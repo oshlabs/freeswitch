@@ -98,8 +98,6 @@ getlib () {
 
 getlibs () {
   # get pinned libraries
-  getlib http://files.freeswitch.org/downloads/libs/sphinxbase-0.8.tar.gz
-  getlib http://files.freeswitch.org/downloads/libs/pocketsphinx-0.8.tar.gz
   getlib http://files.freeswitch.org/downloads/libs/communicator_semi_6000_20080321.tar.gz
   #getlib http://download.zeromq.org/zeromq-2.1.9.tar.gz \
   #  || getlib http://download.zeromq.org/historic/zeromq-2.1.9.tar.gz

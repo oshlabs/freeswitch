@@ -325,7 +325,7 @@ Build-Depends:
 # configure options
  libssl1.0-dev | libssl-dev, unixodbc-dev, libpq-dev,
  libncurses5-dev, libjpeg62-turbo-dev | libjpeg-turbo8-dev | libjpeg62-dev | libjpeg8-dev,
- python-dev | python-dev-is-python2, python3-dev, python-all-dev, python-support (>= 0.90) | dh-python, erlang-dev, libtpl-dev (>= 1.5),
+ python3-dev, python-support (>= 0.90) | dh-python, erlang-dev, libtpl-dev (>= 1.5),
 # documentation
  doxygen,
 # for APR (not essential for build)
@@ -379,15 +379,6 @@ Description: Cross-Platform Scalable Multi-Protocol Soft Switch
  $(debian_wrap "${fs_description}")
  .
  This package contains the FreeSWITCH core library.
-
-Package: python-esl
-Section: python
-Architecture: amd64 armhf
-Depends: \${shlibs:Depends}, \${misc:Depends}, \${python:Depends}
-Description: Cross-Platform Scalable Multi-Protocol Soft Switch
- $(debian_wrap "${fs_description}")
- .
- This package contains the Python binding for FreeSWITCH Event Socket Library (ESL).
 
 Package: libesl-perl
 Section: perl
@@ -559,7 +550,6 @@ Recommends:
  freeswitch-mod-voicemail (= \${binary:Version}),
  freeswitch-mod-voicemail-ivr (= \${binary:Version}),
  freeswitch-mod-flite (= \${binary:Version}),
- freeswitch-mod-pocketsphinx (= \${binary:Version}),
  freeswitch-mod-tts-commandline (= \${binary:Version}),
  freeswitch-mod-dialplan-xml (= \${binary:Version}),
  freeswitch-mod-loopback (= \${binary:Version}),
@@ -651,7 +641,6 @@ Depends: \${misc:Depends}, freeswitch (= \${binary:Version}),
  freeswitch-mod-voicemail (= \${binary:Version}),
  freeswitch-mod-voicemail-ivr (= \${binary:Version}),
  freeswitch-mod-flite (= \${binary:Version}),
- freeswitch-mod-pocketsphinx (= \${binary:Version}),
  freeswitch-mod-tts-commandline (= \${binary:Version}),
  freeswitch-mod-dialplan-asterisk (= \${binary:Version}),
  freeswitch-mod-dialplan-directory (= \${binary:Version}),
@@ -888,7 +877,6 @@ Depends: \${misc:Depends}, freeswitch (= \${binary:Version}),
  freeswitch-mod-voicemail-dbg (= \${binary:Version}),
  freeswitch-mod-voicemail-ivr-dbg (= \${binary:Version}),
  freeswitch-mod-flite-dbg (= \${binary:Version}),
- freeswitch-mod-pocketsphinx-dbg (= \${binary:Version}),
  freeswitch-mod-tts-commandline-dbg (= \${binary:Version}),
  freeswitch-mod-dialplan-asterisk-dbg (= \${binary:Version}),
  freeswitch-mod-dialplan-directory-dbg (= \${binary:Version}),

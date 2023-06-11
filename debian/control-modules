@@ -283,10 +283,6 @@ Description: mod_flite
  Adds mod_flite.
 Build-Depends: libflite-dev | flite1-dev
 
-Module: asr_tts/mod_pocketsphinx
-Description: mod_pocketsphinx
- Adds mod_pocketsphinx.
-
 Module: asr_tts/mod_tts_commandline
 Description: mod_tts_commandline
  Adds mod_tts_commandline.
@@ -554,11 +550,6 @@ Module: event_handlers/mod_radius_cdr
 Description: mod_radius_cdr
  Adds mod_radius_cdr.
 
-Module: event_handlers/mod_rayo
-Description: mod_rayo
- Adds mod_rayo.
-Depends: freeswitch-mod-ssml (= ${binary:Version})
-
 Module: event_handlers/mod_smpp
 Description: mod_snmp
  Adds mod_snmp.
@@ -659,11 +650,6 @@ Description: mod_perl
 Build-Depends: libperl-dev
 Build-Depends-Buster: libperl-dev, libgdbm-compat-dev
 Build-Depends-Bullseye: libperl-dev, libgdbm-compat-dev
-
-Module: languages/mod_python
-Description: mod_python
- Adds mod_python.
-Build-Depends: python-dev | python-dev-is-python2
 
 Module: languages/mod_python3
 Description: mod_python3

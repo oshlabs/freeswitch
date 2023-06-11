@@ -35,7 +35,6 @@
 %define build_py26_esl 0
 %define build_timerfd 0
 %define build_mod_esl 0
-%define build_mod_rayo 1
 %define build_mod_ssml 1
 %define build_mod_v8 0
 
@@ -120,8 +119,6 @@ Vendor:       	http://www.freeswitch.org/
 Source0:        http://files.freeswitch.org/%{name}-%{nonparsedversion}.tar.bz2
 Source1:	http://files.freeswitch.org/downloads/libs/freeradius-client-1.1.7.tar.gz
 Source2:	http://files.freeswitch.org/downloads/libs/communicator_semi_6000_20080321.tar.gz
-Source3:	http://files.freeswitch.org/downloads/libs/pocketsphinx-0.8.tar.gz
-Source4:	http://files.freeswitch.org/downloads/libs/sphinxbase-0.8.tar.gz
 Prefix:        	%{prefix}
 
 
@@ -617,16 +614,6 @@ BuildRequires:  flite-devel >= 2.0.0
 %description asrtts-flite
 Provides FreeSWITCH mod_flite, a interface to the flite text to speech engine
 
-%package asrtts-pocketsphinx
-Summary:	FreeSWITCH mod_pocketsphinx
-Group:          System/Libraries
-Requires:       %{name} = %{version}-%{release}
-BuildRequires:  bison
-
-%description asrtts-pocketsphinx
-Provides FreeSWITCH mod_pocketsphinx, a interface to the OpenSource 
-Pocketsphinx speech recognition engine
-
 %package asrtts-tts-commandline
 Summary:	FreeSWITCH mod_tts_commandline
 Group:          System/Libraries
@@ -994,17 +981,6 @@ Requires:        %{name} = %{version}-%{release}
 %description event-radius-cdr
 RADIUS Logger for the FreeSWITCH open source telephony platform
 
-%if %{build_mod_rayo}
-%package event-rayo
-Summary:        Rayo (XMPP 3PCC) server for the FreeSWITCH open source telephony platform
-Group:          System/Libraries
-Requires:	%{name} = %{version}-%{release}
-
-%description event-rayo
-Rayo 3PCC for FreeSWITCH.  http://rayo.org   http://xmpp.org/extensions/xep-0327.html
-Rayo is an XMPP protocol extension for third-party control of telephone calls.
-%endif
-
 %package event-snmp
 Summary:	SNMP stats reporter for the FreeSWITCH open source telephony platform
 Group:		System/Libraries
@@ -1286,15 +1262,6 @@ Group:		System Environment/Libraries
 %description	-n perl-ESL
 The Perl ESL module allows for native interaction with FreeSWITCH over the event socket interface.
 
-%package	-n python-ESL
-Summary:	The Python ESL module allows for native interaction with FreeSWITCH over the event socket interface.
-Group:		System Environment/Libraries
-Requires:	python
-BuildRequires:	python-devel
-
-%description	-n python-ESL
-The Python ESL module allows for native interaction with FreeSWITCH over the event socket interface.
-
 ######################################################################################################################
 #				FreeSWITCH basic config module
 ######################################################################################################################
@@ -1426,7 +1393,6 @@ APPLICATIONS_MODULES="$APPLICATION_MODULES_AC $APPLICATION_MODULES_DE $APPLICATI
 #				Automatic Speech Recognition and Text To Speech Modules
 #
 ######################################################################################################################
-ASR_TTS_MODULES="asr_tts/mod_flite asr_tts/mod_pocketsphinx asr_tts/mod_tts_commandline"
 
 ######################################################################################################################
 #
@@ -1482,9 +1448,6 @@ EVENT_HANDLERS_MODULES="event_handlers/mod_cdr_csv event_handlers/mod_cdr_pg_csv
 			event_handlers/mod_cdr_mongodb event_handlers/mod_format_cdr event_handlers/mod_erlang_event event_handlers/mod_event_multicast \
 			event_handlers/mod_event_socket event_handlers/mod_json_cdr event_handlers/mod_kazoo event_handlers/mod_radius_cdr \
 			event_handlers/mod_snmp"
-%if %{build_mod_rayo}
-EVENT_HANDLERS_MODULES+=" event_handlers/mod_rayo"
-%endif
 
 #### BUILD ISSUES NET RESOLVED FOR RELEASE event_handlers/mod_event_zmq 
 ######################################################################################################################
@@ -1503,7 +1466,7 @@ FORMATS_MODULES+=" formats/mod_ssml"
 #						Embedded Languages
 #
 ######################################################################################################################
-LANGUAGES_MODULES="languages/mod_lua languages/mod_perl languages/mod_python "
+LANGUAGES_MODULES="languages/mod_lua languages/mod_perl "
 %if %{build_mod_v8}
 LANGUAGES_MODULES+="languages/mod_v8"
 %endif
@@ -1622,7 +1585,6 @@ unset MODULES
 %{__make}
 
 cd libs/esl
-%{__make} pymod
 %{__make} perlmod
 
 
@@ -1652,17 +1614,7 @@ cd libs/esl
 
 #install the esl stuff
 cd libs/esl
-%{__make} DESTDIR=%{buildroot} pymod-install
 %{__make} DESTDIR=%{buildroot} perlmod-install
-
-%if %{build_py26_esl}
-#install esl for python 26
-%{__make} clean
-sed -i s/python\ /python26\ /g python/Makefile
-%{__make} pymod
-%{__mkdir} -p %{buildroot}/usr/lib/python2.6/site-packages
-%{__make} DESTDIR=%{buildroot} pymod-install
-%endif
 
 cd ../..
 
@@ -1928,7 +1880,6 @@ fi
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/opal.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/oreka.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/osp.conf.xml
-%config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/pocketsphinx.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/portaudio.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/post_load_modules.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/pre_load_modules.conf.xml
@@ -2143,9 +2094,6 @@ fi
 %files asrtts-flite
 %{MODINSTDIR}/mod_flite.so*
 
-%files asrtts-pocketsphinx
-%{MODINSTDIR}/mod_pocketsphinx.so*
-
 %files asrtts-tts-commandline
 %{MODINSTDIR}/mod_tts_commandline.so*
 
@@ -2292,11 +2240,6 @@ fi
 %files event-radius-cdr
 %{MODINSTDIR}/mod_radius_cdr.so*
 
-%if %{build_mod_rayo}
-%files event-rayo 
-%{MODINSTDIR}/mod_rayo.so*
-%endif
-
 %files event-snmp
 %{MODINSTDIR}/mod_snmp.so*
 
@@ -2345,10 +2288,6 @@ fi
 %{MODINSTDIR}/mod_perl*.so*
 %{prefix}/perl/*
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/perl.conf.xml
-
-%files python
-%{MODINSTDIR}/mod_python*.so*
-%config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/python.conf.xml
 
 %if %{build_mod_v8}
 %files v8
@@ -2495,11 +2434,6 @@ fi
 %dir %{perl_archlib}/ESL
 %{perl_archlib}/ESL/Dispatch.pm
 %{perl_archlib}/ESL/IVR.pm
-
-%files	-n python-ESL
-%attr(0644, root, bin) /usr/lib*/python*/site-packages/freeswitch.py*
-%attr(0755, root, bin) /usr/lib*/python*/site-packages/_ESL.so*
-%attr(0755, root, bin) /usr/lib*/python*/site-packages/ESL.py*
 
 ######################################################################################################################
 #
