@@ -30,6 +30,7 @@
  */
 
 #include <switch.h>
+#include <switch_types.h>
 #include <netinet/sctp.h>
 #include <sys/epoll.h>
 
