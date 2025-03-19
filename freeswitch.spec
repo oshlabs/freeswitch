@@ -1102,6 +1102,19 @@ BuildRequires:	python-devel
 The Python ESL module allows for native interaction with FreeSWITCH over the event socket interface.
 
 ######################################################################################################################
+#			FreeSWITCH Proof of concept modules
+######################################################################################################################
+
+%package poc-sctp
+Summary:	FreeSWITCH mod_poc_sctp
+Group:          System/Libraries
+Requires:       %{name} = %{version}-%{release}
+
+%description poc-sctp
+Provides FreeSWITCH mod_poc_sctp, provide an SCTP proof of concept module
+
+
+######################################################################################################################
 #				FreeSWITCH basic config module
 ######################################################################################################################
 
