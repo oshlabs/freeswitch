@@ -110,9 +110,39 @@ static switch_status_t init_sctp_server(void)
 	int flags;
 	struct sockaddr_in addr;
 	struct epoll_event ev;
+	struct sctp_initmsg initmsg;
+	struct sctp_event_subscribe events;
 
 	globals.server_fd = socket(AF_INET, SOCK_SEQPACKET, IPPROTO_SCTP);
 	if (globals.server_fd < 0) return SWITCH_STATUS_FALSE;
+
+	// Set SCTP INIT options explicitly (CRITICAL!)
+	memset(&initmsg, 0, sizeof(initmsg));
+	initmsg.sinit_num_ostreams  = 5;
+	initmsg.sinit_max_instreams = 5;
+	initmsg.sinit_max_attempts  = 4;
+	if (setsockopt(globals.server_fd, IPPROTO_SCTP, SCTP_INITMSG, &initmsg, sizeof(initmsg)) < 0) {
+		close(globals.server_fd);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	// Enable SCTP event notifications explicitly (CRITICAL!)
+	memset(&events, 0, sizeof(events));
+	events.sctp_data_io_event = 1;
+	events.sctp_association_event = 1;  // REQUIRED!
+	events.sctp_address_event = 1;
+	events.sctp_send_failure_event = 1;
+	events.sctp_peer_error_event = 1;
+	events.sctp_shutdown_event = 1;
+	events.sctp_partial_delivery_event = 1;
+	events.sctp_adaptation_layer_event = 1;
+	events.sctp_authentication_event = 1;
+	events.sctp_sender_dry_event = 1;
+
+	if (setsockopt(globals.server_fd, IPPROTO_SCTP, SCTP_EVENTS, &events, sizeof(events)) < 0) {
+		close(globals.server_fd);
+		return SWITCH_STATUS_FALSE;
+	}
 
 	// Set non-blocking
 	flags = fcntl(globals.server_fd, F_GETFL, 0);
@@ -120,7 +150,7 @@ static switch_status_t init_sctp_server(void)
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = INADDR_ANY;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); //INADDR_ANY;
 	addr.sin_port = htons(SCTP_PORT);
 
 	if (bind(globals.server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
