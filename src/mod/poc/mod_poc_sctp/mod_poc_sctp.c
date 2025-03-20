@@ -78,6 +78,8 @@ static void *SWITCH_THREAD_FUNC sctp_server_thread(switch_thread_t *thread, void
 				struct sctp_sndrcvinfo sinfo;
 				int flags;
 
+#if 0
+
 				while ((len = sctp_recvmsg(globals.server_fd, buffer, MAX_BUFFER-1,
 										   (struct sockaddr*)&peer_addr, &peer_len,
 										   &sinfo, &flags)) > 0) {
@@ -96,7 +98,44 @@ static void *SWITCH_THREAD_FUNC sctp_server_thread(switch_thread_t *thread, void
 									  "recvmsg error: %s\n", strerror(errno));
 				}
 
+#else
 
+				// In your recvmsg loop:
+				len = sctp_recvmsg(globals.server_fd, buffer, sizeof(buffer),
+								   (struct sockaddr*)&peer_addr, &peer_len,
+								   &sinfo, &flags);
+
+				if (len > 0) {
+					if (flags & MSG_NOTIFICATION) {
+						union sctp_notification *notif = (union sctp_notification*)buffer;
+						if (notif->sn_header.sn_type == SCTP_ASSOC_CHANGE) {
+							struct sctp_assoc_change *sac = &notif->sn_assoc_change;
+							switch(sac->sac_state) {
+								case SCTP_COMM_UP:
+									switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, 
+										"SCTP association established\n");
+									break;
+								case SCTP_COMM_LOST:
+								case SCTP_SHUTDOWN_COMP:
+								case SCTP_CANT_STR_ASSOC:
+									switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, 
+										"SCTP association lost or failed\n");
+									break;
+							}
+						}
+						continue; // important: do not process as regular data
+					}
+
+					buffer[len] = '\0';
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, 
+									  "SCTP received: %s\n", buffer);
+					sctp_sendmsg(globals.server_fd, "ok", 2,
+								 (struct sockaddr*)&peer_addr, peer_len,
+								 sinfo.sinfo_ppid, sinfo.sinfo_flags,
+								 sinfo.sinfo_stream, 0, 0);
+				}
+
+#endif
 
 			}
 		}
