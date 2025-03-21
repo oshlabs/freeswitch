@@ -43,6 +43,15 @@ SWITCH_MODULE_DEFINITION(mod_poc_sctp, mod_poc_sctp_load, mod_poc_sctp_shutdown,
 #define MAX_EVENTS 10
 #define MAX_BUFFER (64 * 1024)  // 64K buffer
 
+struct dialog_thread {
+	char *dialog_id;
+	switch_thread_t *thread;
+	switch_queue_t *message_queue;
+	switch_memory_pool_t *pool;
+	switch_mutex_t *mutex;
+	switch_bool_t running;
+};
+
 static struct {
 	switch_memory_pool_t *pool;
 	switch_socket_t *socket;
@@ -51,6 +60,8 @@ static struct {
 	switch_bool_t running;
 	switch_thread_t *thread;
 	switch_mutex_t *mutex;
+	switch_hash_t *dialogs;          // Hash table for dialog threads
+	switch_mutex_t *dialogs_mutex;   // Mutex for dialog hash table access
 } globals;
 
 static void handle_sctp_notification(union sctp_notification *snp)
@@ -164,37 +175,159 @@ static void handle_sctp_notification(union sctp_notification *snp)
 	}
 }
 
+static void *SWITCH_THREAD_FUNC dialog_thread_run(switch_thread_t *thread, void *obj)
+{
+	struct dialog_thread *dialog = (struct dialog_thread *)obj;
+	void *pop;
+	cJSON *json;
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, 
+		"Dialog thread starting for dialog_id: %s\n", dialog->dialog_id);
+
+	while (dialog->running) {
+		if (switch_queue_pop(dialog->message_queue, &pop) == SWITCH_STATUS_SUCCESS) {
+			char *pretty;
+			json = (cJSON *)pop;
+			
+			// Process the JSON message
+			pretty = cJSON_Print(json);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+				"Dialog %s processing message:\n%s\n", dialog->dialog_id, pretty);
+			switch_safe_free(pretty);
+			
+			cJSON_Delete(json);
+		}
+	}
+
+	// Remove ourselves from the hash table
+	switch_mutex_lock(globals.dialogs_mutex);
+	switch_core_hash_delete(globals.dialogs, dialog->dialog_id);
+	switch_mutex_unlock(globals.dialogs_mutex);
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+		"Dialog thread ending for dialog_id: %s\n", dialog->dialog_id);
+
+	// Clean up our memory pool which will free all allocated memory
+	switch_core_destroy_memory_pool(&dialog->pool);
+	return NULL;
+}
+
+static struct dialog_thread *create_dialog_thread(const char *dialog_id)
+{
+	struct dialog_thread *dialog;
+	switch_threadattr_t *thd_attr = NULL;
+	switch_memory_pool_t *pool;
+
+	// Create memory pool for this dialog
+	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+			"Failed to create memory pool for dialog: %s\n", dialog_id);
+		return NULL;
+	}
+
+	// Allocate dialog structure
+	dialog = switch_core_alloc(pool, sizeof(struct dialog_thread));
+	dialog->pool = pool;
+	dialog->dialog_id = switch_core_strdup(pool, dialog_id);
+	dialog->running = SWITCH_TRUE;
+
+	// Initialize mutex and message queue
+	switch_mutex_init(&dialog->mutex, SWITCH_MUTEX_NESTED, dialog->pool);
+	if (switch_queue_create(&dialog->message_queue, 100, dialog->pool) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+			"Failed to create message queue for dialog: %s\n", dialog_id);
+		switch_core_destroy_memory_pool(&pool);
+		return NULL;
+	}
+
+	// Create and start the dialog thread
+	switch_threadattr_create(&thd_attr, dialog->pool);
+	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+	if (switch_thread_create(&dialog->thread, thd_attr, dialog_thread_run, dialog, dialog->pool) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+			"Failed to create thread for dialog: %s\n", dialog_id);
+		switch_core_destroy_memory_pool(&pool);
+		return NULL;
+	}
+
+	return dialog;
+}
+
 static void handle_sctp_message(const char *buffer, size_t len, 
 							  struct sockaddr_in *peer_addr, socklen_t peer_len,
 							  struct sctp_sndrcvinfo *sinfo)
 {
-	cJSON *json;
+	cJSON *json, *dialog_id_obj;
+	struct dialog_thread *dialog = NULL;
+	const char *dialog_id;
+	char *error_response = NULL;
 
 	json = cJSON_Parse(buffer);
-	if (json) {
-		char *pretty = cJSON_Print(json);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, 
-			"SCTP received JSON from %s:%d (size=%ld):\n%s\n",
-			inet_ntoa(peer_addr->sin_addr),
-			ntohs(peer_addr->sin_port),
-			(long)len,
-			pretty);
-		switch_safe_free(pretty);
-		cJSON_Delete(json);
-	} else {
+	if (!json) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, 
 			"SCTP received non-JSON message from %s:%d (size=%ld): %s\n",
 			inet_ntoa(peer_addr->sin_addr),
 			ntohs(peer_addr->sin_port),
 			(long)len,
 			buffer);
+		error_response = "error: invalid JSON";
+		goto send_response;
 	}
 
-	// Send "ok" response
-	sctp_sendmsg(globals.server_fd, "ok", 2,
-		(struct sockaddr*)peer_addr, peer_len,
-		sinfo->sinfo_ppid, sinfo->sinfo_flags,
-		sinfo->sinfo_stream, 0, 0);
+	// Look for dialog-id in the JSON
+	dialog_id_obj = cJSON_GetObjectItem(json, "dialog-id");
+	if (!dialog_id_obj || !cJSON_IsString(dialog_id_obj)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"Received JSON without valid dialog-id from %s:%d\n",
+			inet_ntoa(peer_addr->sin_addr),
+			ntohs(peer_addr->sin_port));
+		error_response = "error: missing or invalid dialog-id";
+		cJSON_Delete(json);
+		goto send_response;
+	}
+
+	dialog_id = dialog_id_obj->valuestring;
+
+	// Lock the dialogs hash table
+	switch_mutex_lock(globals.dialogs_mutex);
+
+	// Look up existing dialog
+	dialog = switch_core_hash_find(globals.dialogs, dialog_id);
+	if (!dialog) {
+		// Create new dialog thread if not found
+		dialog = create_dialog_thread(dialog_id);
+		if (dialog) {
+			switch_core_hash_insert(globals.dialogs, dialog_id, dialog);
+		}
+	}
+
+	switch_mutex_unlock(globals.dialogs_mutex);
+
+	if (!dialog) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+			"Failed to create dialog thread for dialog-id: %s\n", dialog_id);
+		error_response = "error: failed to create dialog thread";
+		cJSON_Delete(json);
+		goto send_response;
+	}
+
+	// Queue the JSON to the dialog thread
+	if (switch_queue_trypush(dialog->message_queue, json) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+			"Failed to queue message for dialog-id: %s\n", dialog_id);
+		error_response = "error: failed to queue message";
+		cJSON_Delete(json);
+		goto send_response;
+	}
+
+send_response:
+	// Send response
+	sctp_sendmsg(globals.server_fd, 
+				 error_response ? error_response : "ok",
+				 error_response ? strlen(error_response) : 2,
+				 (struct sockaddr*)peer_addr, peer_len,
+				 sinfo->sinfo_ppid, sinfo->sinfo_flags,
+				 sinfo->sinfo_stream, 0, 0);
 }
 
 static void *SWITCH_THREAD_FUNC sctp_server_thread(switch_thread_t *thread, void *obj)
@@ -357,6 +490,44 @@ SWITCH_STANDARD_API(sctp_send_function)
 	return SWITCH_STATUS_SUCCESS;
 }
 
+SWITCH_STANDARD_API(sctp_dialogs_function)
+{
+	switch_hash_index_t *hi;
+	const void *key;
+	void *val;
+	struct dialog_thread *dialog;
+	int count = 0;
+
+	stream->write_function(stream, "Active SCTP Dialogs:\n");
+	stream->write_function(stream, "==================\n");
+
+	switch_mutex_lock(globals.dialogs_mutex);
+	
+	for (hi = switch_core_hash_first(globals.dialogs); hi; hi = switch_core_hash_next(&hi)) {
+		switch_core_hash_this(hi, &key, NULL, &val);
+		dialog = (struct dialog_thread *)val;
+		count++;
+		
+		stream->write_function(stream, "%d. Dialog ID: %s\n", count, dialog->dialog_id);
+		
+		// Could add more info here like:
+		// - Queue size
+		// - Last activity timestamp
+		// - Total messages processed
+	}
+
+	switch_mutex_unlock(globals.dialogs_mutex);
+
+	if (count == 0) {
+		stream->write_function(stream, "No active dialogs\n");
+	} else {
+		stream->write_function(stream, "------------------\n");
+		stream->write_function(stream, "Total dialogs: %d\n", count);
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
 SWITCH_MODULE_LOAD_FUNCTION(mod_poc_sctp_load)
 {
 	switch_api_interface_t *api_interface;
@@ -365,7 +536,12 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_poc_sctp_load)
 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
 	globals.pool = pool;
 
+	// Initialize dialog hash table
+	switch_mutex_init(&globals.dialogs_mutex, SWITCH_MUTEX_NESTED, globals.pool);
+	switch_core_hash_init(&globals.dialogs);
+
 	SWITCH_ADD_API(api_interface, "sctp_send", "Send SCTP Message", sctp_send_function, "<message>");
+	SWITCH_ADD_API(api_interface, "sctp_dialogs", "List Active SCTP Dialogs", sctp_dialogs_function, "");
 
 	switch_mutex_init(&globals.mutex, SWITCH_MUTEX_NESTED, globals.pool);
 	globals.running = SWITCH_TRUE;
