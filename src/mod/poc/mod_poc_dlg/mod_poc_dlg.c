@@ -165,7 +165,7 @@ SWITCH_STANDARD_API(dlg_api_function)
 	}
 
 	if (!strcasecmp(argv[0], "new")) {
-		dlg_locals_t *dlg;
+		dlg_locals_t *locals;
 
 		// Check if dlg already exists
 		if (find_dlg(argv[1])) {
@@ -174,21 +174,21 @@ SWITCH_STANDARD_API(dlg_api_function)
 		}
 
 		// Create new dlg thread
-		dlg = new_dlg_thread(argv[1]);
-		if (!dlg) {
+		locals = new_dlg_thread(argv[1]);
+		if (!locals) {
 			stream->write_function(stream, "-ERR Failed to create new dlg %s\n", argv[1]);
 			goto done;
 		}
 
 		// Add to hash table
 		switch_mutex_lock(globals.dlgs_mutex);
-		switch_core_hash_insert(globals.dlgs, dlg->id, dlg);
+		switch_core_hash_insert(globals.dlgs, locals->id, locals);
 		switch_mutex_unlock(globals.dlgs_mutex);
 
 		stream->write_function(stream, "+OK new dlg %s created\n", argv[1]);
 	}
 	else if (!strcasecmp(argv[0], "send")) {
-		dlg_locals_t *dlg;
+		dlg_locals_t *locals;
 		char *message;
 
 		if (argc < 3) {
@@ -196,8 +196,8 @@ SWITCH_STANDARD_API(dlg_api_function)
 			goto done;
 		}
 
-		dlg = find_dlg(argv[1]);
-		if (!dlg) {
+		locals = find_dlg(argv[1]);
+		if (!locals) {
 			stream->write_function(stream, "-ERR dlg %s not found\n", argv[1]);
 			goto done;
 		}
@@ -206,12 +206,12 @@ SWITCH_STANDARD_API(dlg_api_function)
 		message = strdup(argv[2]);
 		if (!message) {
 			stream->write_function(stream, "-ERR Memory allocation failed\n");
-			switch_thread_rwlock_unlock(dlg->rwlock);
+			switch_thread_rwlock_unlock(locals->rwlock);
 			goto done;
 		}
 		
 		// Queue message
-		if (switch_queue_trypush(dlg->message_queue, message) != SWITCH_STATUS_SUCCESS) {
+		if (switch_queue_trypush(locals->message_queue, message) != SWITCH_STATUS_SUCCESS) {
 			switch_safe_free(message);  // Free message if queue push failed
 			stream->write_function(stream, "-ERR Failed to queue message\n");
 		} else {
@@ -219,7 +219,7 @@ SWITCH_STANDARD_API(dlg_api_function)
 		}
 
 		// Release read lock
-		switch_thread_rwlock_unlock(dlg->rwlock);
+		switch_thread_rwlock_unlock(locals->rwlock);
 	}
 	else {
 		stream->write_function(stream, "-ERR Unknown command: %s\n", argv[0]);
