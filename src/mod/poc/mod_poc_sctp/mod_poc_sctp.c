@@ -99,30 +99,110 @@ static void *SWITCH_THREAD_FUNC sctp_server_thread(switch_thread_t *thread, void
 					if (msg_flags & MSG_NOTIFICATION) {
 						snp = (union sctp_notification *)buffer;
 						switch(snp->sn_header.sn_type) {
-							case SCTP_ASSOC_CHANGE:
+							case SCTP_ASSOC_CHANGE: {
+								char *state_str;
+								switch(snp->sn_assoc_change.sac_state) {
+									case SCTP_COMM_UP: state_str = "COMM_UP"; break;
+									case SCTP_COMM_LOST: state_str = "COMM_LOST"; break;
+									case SCTP_RESTART: state_str = "RESTART"; break;
+									case SCTP_SHUTDOWN_COMP: state_str = "SHUTDOWN_COMP"; break;
+									case SCTP_CANT_STR_ASSOC: state_str = "CANT_START_ASSOC"; break;
+									default: state_str = "UNKNOWN"; break;
+								}
 								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-									"SCTP_ASSOC_CHANGE event, state=%d\n",
-									snp->sn_assoc_change.sac_state);
+									"SCTP_ASSOC_CHANGE: state=%s(%d), error=%d, outbound=%d, inbound=%d, assoc_id=%d\n",
+									state_str,
+									snp->sn_assoc_change.sac_state,
+									snp->sn_assoc_change.sac_error,
+									snp->sn_assoc_change.sac_outbound_streams,
+									snp->sn_assoc_change.sac_inbound_streams,
+									snp->sn_assoc_change.sac_assoc_id);
 								break;
-							case SCTP_PEER_ADDR_CHANGE:
-								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-									"SCTP_PEER_ADDR_CHANGE event\n");
+							}
+							case SCTP_PEER_ADDR_CHANGE: {
+								char *state_str;
+								char addr_str[INET6_ADDRSTRLEN];
+								struct sockaddr_in *sin;
+								struct sockaddr_in6 *sin6;
+								void *addr_ptr;
+								uint16_t port;
+
+								switch(snp->sn_paddr_change.spc_state) {
+									case SCTP_ADDR_AVAILABLE: state_str = "AVAILABLE"; break;
+									case SCTP_ADDR_UNREACHABLE: state_str = "UNREACHABLE"; break;
+									case SCTP_ADDR_REMOVED: state_str = "REMOVED"; break;
+									case SCTP_ADDR_ADDED: state_str = "ADDED"; break;
+									case SCTP_ADDR_MADE_PRIM: state_str = "MADE_PRIMARY"; break;
+									case SCTP_ADDR_CONFIRMED: state_str = "CONFIRMED"; break;
+									default: state_str = "UNKNOWN"; break;
+								}
+
+								switch(snp->sn_paddr_change.spc_aaddr.ss_family) {
+									case AF_INET:
+										sin = (struct sockaddr_in *)&snp->sn_paddr_change.spc_aaddr;
+										addr_ptr = &sin->sin_addr;
+										port = ntohs(sin->sin_port);
+										break;
+									case AF_INET6:
+										sin6 = (struct sockaddr_in6 *)&snp->sn_paddr_change.spc_aaddr;
+										addr_ptr = &sin6->sin6_addr;
+										port = ntohs(sin6->sin6_port);
+										break;
+									default:
+										addr_ptr = NULL;
+								}
+
+								if (addr_ptr) {
+									inet_ntop(snp->sn_paddr_change.spc_aaddr.ss_family,
+											addr_ptr, addr_str, sizeof(addr_str));
+									switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+										"SCTP_PEER_ADDR_CHANGE: peer=%s:%d state=%s(%d), error=%d, assoc_id=%d\n",
+										addr_str, port,
+										state_str,
+										snp->sn_paddr_change.spc_state,
+										snp->sn_paddr_change.spc_error,
+										snp->sn_paddr_change.spc_assoc_id);
+								} else {
+									switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+										"SCTP_PEER_ADDR_CHANGE: unknown address family=%d state=%s(%d), error=%d, assoc_id=%d\n",
+										snp->sn_paddr_change.spc_aaddr.ss_family,
+										state_str,
+										snp->sn_paddr_change.spc_state,
+										snp->sn_paddr_change.spc_error,
+										snp->sn_paddr_change.spc_assoc_id);
+								}
 								break;
+							}
 							case SCTP_REMOTE_ERROR:
 								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-									"SCTP_REMOTE_ERROR event\n");
+									"SCTP_REMOTE_ERROR: error=%d, assoc_id=%d\n",
+									snp->sn_remote_error.sre_error,
+									snp->sn_remote_error.sre_assoc_id);
 								break;
-							case SCTP_SEND_FAILED:
+							case SCTP_SEND_FAILED: {
+								char *error_str;
+								switch(snp->sn_send_failed.ssf_error) {
+									case ETIMEDOUT: error_str = "ETIMEDOUT"; break;
+									case ECONNRESET: error_str = "ECONNRESET"; break;
+									case EHOSTUNREACH: error_str = "EHOSTUNREACH"; break;
+									default: error_str = "UNKNOWN"; break;
+								}
 								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-									"SCTP_SEND_FAILED event\n");
+									"SCTP_SEND_FAILED: error=%s(%d), flags=%x, assoc_id=%d\n",
+									error_str,
+									snp->sn_send_failed.ssf_error,
+									snp->sn_send_failed.ssf_flags,
+									snp->sn_send_failed.ssf_assoc_id);
 								break;
+							}
 							case SCTP_SHUTDOWN_EVENT:
 								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-									"SCTP_SHUTDOWN_EVENT event\n");
+									"SCTP_SHUTDOWN_EVENT: assoc_id=%d\n",
+									snp->sn_shutdown_event.sse_assoc_id);
 								break;
 							default:
 								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-									"Unknown SCTP notification: %d\n",
+									"Unknown SCTP notification type: %d\n",
 									snp->sn_header.sn_type);
 						}
 						continue;
