@@ -33,6 +33,7 @@
 #include <switch_types.h>
 #include <netinet/sctp.h>
 #include <sys/epoll.h>
+#include <switch_json.h>
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_poc_sctp_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_poc_sctp_shutdown);
@@ -40,7 +41,7 @@ SWITCH_MODULE_DEFINITION(mod_poc_sctp, mod_poc_sctp_load, mod_poc_sctp_shutdown,
 
 #define SCTP_PORT 5555
 #define MAX_EVENTS 10
-#define MAX_BUFFER 1024
+#define MAX_BUFFER (64 * 1024)  // 64K buffer
 
 static struct {
 	switch_memory_pool_t *pool;
@@ -63,10 +64,9 @@ static switch_status_t sctp_send_message(int client_fd, const char *message) {
 static void *SWITCH_THREAD_FUNC sctp_server_thread(switch_thread_t *thread, void *obj)
 {
 	struct epoll_event events[MAX_EVENTS];
-	char peek_buffer[MAX_BUFFER];
-	char *buffer = NULL;
+	char buffer[MAX_BUFFER];
 	int nfds, i;
-	ssize_t len, peek_len;
+	ssize_t len;
 	struct sockaddr_in peer_addr;
 	socklen_t peer_len;
 	struct sctp_sndrcvinfo sinfo;
@@ -92,36 +92,13 @@ static void *SWITCH_THREAD_FUNC sctp_server_thread(switch_thread_t *thread, void
 		for (i = 0; i < nfds; i++) {
 			if (events[i].data.fd == globals.server_fd) {
 				peer_len = sizeof(peer_addr);
+				msg_flags = 0;
 
-				// First peek at the message to get its size
-				msg_flags = MSG_PEEK;
-				peek_len = sctp_recvmsg(globals.server_fd, peek_buffer, sizeof(peek_buffer),
-					(struct sockaddr*)&peer_addr, &peer_len,
-					&sinfo, &msg_flags);
-
-				if (peek_len < 0) {
-					if (errno != EAGAIN && errno != EWOULDBLOCK) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-							"peek error: %s\n", strerror(errno));
-					}
-					continue;
-				}
-
-				// Allocate buffer of appropriate size
-				switch_malloc(buffer, peek_len + 1);
-				if (!buffer) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-						"Failed to allocate buffer of size %ld\n", (long)peek_len + 1);
-					continue;
-				}
-
-				// Now read the actual message
-				len = sctp_recvmsg(globals.server_fd, buffer, peek_len,
+				len = sctp_recvmsg(globals.server_fd, buffer, sizeof(buffer),
 					(struct sockaddr*)&peer_addr, &peer_len,
 					&sinfo, &msg_flags);
 
 				if (len < 0) {
-					switch_safe_free(buffer);
 					if (errno != EAGAIN && errno != EWOULDBLOCK) {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
 							"recvmsg error: %s\n", strerror(errno));
@@ -239,13 +216,29 @@ static void *SWITCH_THREAD_FUNC sctp_server_thread(switch_thread_t *thread, void
 								snp->sn_header.sn_type);
 					}
 				} else {
+					cJSON *json;
 					buffer[len] = '\0';
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, 
-						"SCTP received from %s:%d (size=%ld): %s\n",
-						inet_ntoa(peer_addr.sin_addr),
-						ntohs(peer_addr.sin_port),
-						(long)len,
-						buffer);
+					
+					// Try to parse as JSON
+					json = cJSON_Parse(buffer);
+					if (json) {
+						char *pretty = cJSON_Print(json);
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, 
+							"SCTP received JSON from %s:%d (size=%ld):\n%s\n",
+							inet_ntoa(peer_addr.sin_addr),
+							ntohs(peer_addr.sin_port),
+							(long)len,
+							pretty);
+						switch_safe_free(pretty);
+						cJSON_Delete(json);
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, 
+							"SCTP received non-JSON message from %s:%d (size=%ld): %s\n",
+							inet_ntoa(peer_addr.sin_addr),
+							ntohs(peer_addr.sin_port),
+							(long)len,
+							buffer);
+					}
 
 					// Send "ok" response
 					sctp_sendmsg(globals.server_fd, "ok", 2,
@@ -253,8 +246,6 @@ static void *SWITCH_THREAD_FUNC sctp_server_thread(switch_thread_t *thread, void
 						sinfo.sinfo_ppid, sinfo.sinfo_flags,
 						sinfo.sinfo_stream, 0, 0);
 				}
-
-				switch_safe_free(buffer);
 			}
 		}
 	}
