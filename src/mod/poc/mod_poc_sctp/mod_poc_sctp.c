@@ -67,11 +67,14 @@ static void *SWITCH_THREAD_FUNC sctp_server_thread(switch_thread_t *thread, void
 	int nfds, i;
 	ssize_t len;
 
+switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "starting sctp_server_thread\n");
+
 	while (globals.running) {
-		nfds = epoll_wait(globals.epoll_fd, events, MAX_EVENTS, -1);
+		nfds = epoll_wait(globals.epoll_fd, events, MAX_EVENTS, 1000);
 		if (nfds < 0) continue;
 
 		for (i = 0; i < nfds; i++) {
+switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "xxx %d\n", i);
 			if (events[i].data.fd == globals.server_fd) {
 				struct sockaddr_in peer_addr;
 				socklen_t peer_len = sizeof(peer_addr);
@@ -141,6 +144,8 @@ static void *SWITCH_THREAD_FUNC sctp_server_thread(switch_thread_t *thread, void
 		}
 	}
 
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "exiting sctp_server_thread\n");
+
 	return NULL;
 }
 
@@ -161,6 +166,7 @@ static switch_status_t init_sctp_server(void)
 	initmsg.sinit_max_instreams = 5;
 	initmsg.sinit_max_attempts  = 4;
 	if (setsockopt(globals.server_fd, IPPROTO_SCTP, SCTP_INITMSG, &initmsg, sizeof(initmsg)) < 0) {
+
 		close(globals.server_fd);
 		return SWITCH_STATUS_FALSE;
 	}
