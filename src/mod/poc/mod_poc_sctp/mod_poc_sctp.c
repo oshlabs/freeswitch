@@ -257,6 +257,21 @@ static struct dialog_thread *create_dialog_thread(const char *dialog_id)
 	return dialog;
 }
 
+static struct dialog_thread *find_dialog(const char *dialog_id)
+{
+	struct dialog_thread *dialog = NULL;
+
+	switch_mutex_lock(globals.dialogs_mutex);
+	if ((dialog = switch_core_hash_find(globals.dialogs, dialog_id))) {
+		if (switch_thread_rwlock_tryrdlock(dialog->rwlock) != SWITCH_STATUS_SUCCESS) {
+			dialog = NULL;
+		}
+	}
+	switch_mutex_unlock(globals.dialogs_mutex);
+
+	return dialog;
+}
+
 static void handle_sctp_message(const char *buffer, size_t len, 
 							  struct sockaddr_in *peer_addr, socklen_t peer_len,
 							  struct sctp_sndrcvinfo *sinfo)
@@ -293,34 +308,34 @@ static void handle_sctp_message(const char *buffer, size_t len,
 
 	dialog_id = dialog_id_obj->valuestring;
 
-	// Lock the dialogs hash table
-	switch_mutex_lock(globals.dialogs_mutex);
-
-	// Look up existing dialog
-	dialog = switch_core_hash_find(globals.dialogs, dialog_id);
+	// Look up existing dialog - this will give us a read lock if successful
+	dialog = find_dialog(dialog_id);
 	if (!dialog) {
 		// Create new dialog thread if not found
-		dialog = create_dialog_thread(dialog_id);
-		if (dialog) {
-			switch_core_hash_insert(globals.dialogs, dialog_id, dialog);
+		switch_mutex_lock(globals.dialogs_mutex);
+		dialog = switch_core_hash_find(globals.dialogs, dialog_id);
+		if (!dialog) {
+			dialog = create_dialog_thread(dialog_id);
+			if (dialog) {
+				switch_core_hash_insert(globals.dialogs, dialog_id, dialog);
+				// Get read lock on newly created dialog
+				if (switch_thread_rwlock_tryrdlock(dialog->rwlock) != SWITCH_STATUS_SUCCESS) {
+					dialog = NULL;
+				}
+			}
+		} else {
+			// Dialog exists but we couldn't get read lock earlier - try again
+			if (switch_thread_rwlock_tryrdlock(dialog->rwlock) != SWITCH_STATUS_SUCCESS) {
+				dialog = NULL;
+			}
 		}
+		switch_mutex_unlock(globals.dialogs_mutex);
 	}
-
-	switch_mutex_unlock(globals.dialogs_mutex);
 
 	if (!dialog) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-			"Failed to create dialog thread for dialog-id: %s\n", dialog_id);
+			"Failed to create or access dialog thread for dialog-id: %s\n", dialog_id);
 		error_response = "error: failed to create dialog thread";
-		cJSON_Delete(json);
-		goto send_response;
-	}
-
-	// Get read lock on dialog before using it
-	if (switch_thread_rwlock_tryrdlock(dialog->rwlock) != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-			"Failed to get read lock for dialog-id: %s\n", dialog_id);
-		error_response = "error: dialog is shutting down";
 		cJSON_Delete(json);
 		goto send_response;
 	}
