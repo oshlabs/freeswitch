@@ -46,8 +46,8 @@ typedef struct {
 
 static struct {
 	switch_memory_pool_t *pool;
-	switch_hash_t *dlgs;          // Hash table for dlg threads
-	switch_mutex_t *dlgs_mutex;   // Mutex for dlg hash table access
+	switch_hash_t *dialogs;          // Hash table for dlg threads
+	switch_mutex_t *dialogs_mutex;   // Mutex for dlg hash table access
 } globals;
 
 static void *SWITCH_THREAD_FUNC dlg_thread_run(switch_thread_t *thread, void *obj)
@@ -72,9 +72,9 @@ static void *SWITCH_THREAD_FUNC dlg_thread_run(switch_thread_t *thread, void *ob
 	switch_thread_rwlock_wrlock(locals->rwlock);
 	
 	// Remove from hash while holding write lock
-	switch_mutex_lock(globals.dlgs_mutex);
-	switch_core_hash_delete(globals.dlgs, locals->id);
-	switch_mutex_unlock(globals.dlgs_mutex);
+	switch_mutex_lock(globals.dialogs_mutex);
+	switch_core_hash_delete(globals.dialogs, locals->id);
+	switch_mutex_unlock(globals.dialogs_mutex);
 	
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 		"dlg thread ending for id: %s\n", locals->id);
@@ -90,15 +90,15 @@ static dlg_locals_t *find_dlg(const char *id)
 {
 	dlg_locals_t *locals = NULL;
 	
-	switch_mutex_lock(globals.dlgs_mutex);
-	if ((locals = switch_core_hash_find(globals.dlgs, id))) {
+	switch_mutex_lock(globals.dialogs_mutex);
+	if ((locals = switch_core_hash_find(globals.dialogs, id))) {
 		if (switch_thread_rwlock_tryrdlock(locals->rwlock) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 				"Found dlg but failed to lock rwlock: %s\n", id);
 			locals = NULL;
 		}
 	}
-	switch_mutex_unlock(globals.dlgs_mutex);
+	switch_mutex_unlock(globals.dialogs_mutex);
 	
 	return locals;
 }
@@ -181,9 +181,9 @@ SWITCH_STANDARD_API(dlg_api_function)
 		}
 
 		// Add to hash table
-		switch_mutex_lock(globals.dlgs_mutex);
-		switch_core_hash_insert(globals.dlgs, locals->id, locals);
-		switch_mutex_unlock(globals.dlgs_mutex);
+		switch_mutex_lock(globals.dialogs_mutex);
+		switch_core_hash_insert(globals.dialogs, locals->id, locals);
+		switch_mutex_unlock(globals.dialogs_mutex);
 
 		stream->write_function(stream, "+OK new dlg %s created\n", argv[1]);
 	}
@@ -238,8 +238,8 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_poc_dlg_load)
 	globals.pool = pool;
 
 	// Initialize dlg hash table
-	switch_mutex_init(&globals.dlgs_mutex, SWITCH_MUTEX_NESTED, globals.pool);
-	switch_core_hash_init(&globals.dlgs);
+	switch_mutex_init(&globals.dialogs_mutex, SWITCH_MUTEX_NESTED, globals.pool);
+	switch_core_hash_init(&globals.dialogs);
 
 	SWITCH_ADD_API(api_interface, "dlg", "dlg testing", dlg_api_function, "<cmd> <id> [<args>]");
 
@@ -250,15 +250,15 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_poc_dlg_shutdown)
 {
 	switch_hash_index_t *hi;
 	void *val;
-	dlg_locals_t *dlg;
+	dlg_locals_t *locals;
 
-	switch_mutex_lock(globals.dlgs_mutex);
-	for (hi = switch_core_hash_first(globals.dlgs); hi; hi = switch_core_hash_next(&hi)) {
+	switch_mutex_lock(globals.dialogs_mutex);
+	for (hi = switch_core_hash_first(globals.dialogs); hi; hi = switch_core_hash_next(&hi)) {
 		switch_core_hash_this(hi, NULL, NULL, &val);
-		dlg = (dlg_locals_t *)val;
-		dlg->running = SWITCH_FALSE;
+		locals = (dlg_locals_t *)val;
+		locals->running = SWITCH_FALSE;
 	}
-	switch_mutex_unlock(globals.dlgs_mutex);
+	switch_mutex_unlock(globals.dialogs_mutex);
 
 	return SWITCH_STATUS_SUCCESS;
 }
