@@ -25,15 +25,15 @@
  *
  * Leon de Rooij <leon@exquisip.nl>
  *
- * mod_poc_dialog.c -- Dialog Proof of concept module
+ * mod_poc_dlg.c -- Dialog Proof of concept module
  *
  */
 
 #include <switch.h>
 
-SWITCH_MODULE_LOAD_FUNCTION(mod_poc_dialog_load);
-SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_poc_dialog_shutdown);
-SWITCH_MODULE_DEFINITION(mod_poc_dialog, mod_poc_dialog_load, mod_poc_dialog_shutdown, NULL);
+SWITCH_MODULE_LOAD_FUNCTION(mod_poc_dlg_load);
+SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_poc_dlg_shutdown);
+SWITCH_MODULE_DEFINITION(mod_poc_dlg, mod_poc_dlg_load, mod_poc_dlg_shutdown, NULL);
 
 typedef struct {
 	char *id;
@@ -42,28 +42,28 @@ typedef struct {
 	switch_memory_pool_t *pool;
 	switch_thread_rwlock_t *rwlock;
 	switch_bool_t running;
-} dialog_locals_t;
+} dlg_locals_t;
 
 static struct {
 	switch_memory_pool_t *pool;
-	switch_hash_t *dialogs;          // Hash table for dialog threads
-	switch_mutex_t *dialogs_mutex;   // Mutex for dialog hash table access
+	switch_hash_t *dlgs;          // Hash table for dlg threads
+	switch_mutex_t *dlgs_mutex;   // Mutex for dlg hash table access
 } globals;
 
-static void *SWITCH_THREAD_FUNC dialog_thread_run(switch_thread_t *thread, void *obj)
+static void *SWITCH_THREAD_FUNC dlg_thread_run(switch_thread_t *thread, void *obj)
 {
-	dialog_locals_t *locals = (dialog_locals_t *)obj;
+	dlg_locals_t *locals = (dlg_locals_t *)obj;
 	void *pop;
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, 
-		"Dialog thread starting for id: %s\n", locals->id);
+		"dlg thread starting for id: %s\n", locals->id);
 
 	while (locals->running) {
 		if (switch_queue_pop(locals->message_queue, &pop) == SWITCH_STATUS_SUCCESS) {
 			char *msg = (char *)pop;
 			
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-				"Dialog %s processing message: %s\n", locals->id, msg);
+				"dlg %s processing message: %s\n", locals->id, msg);
 			switch_safe_free(msg);
 		}
 	}
@@ -72,52 +72,52 @@ static void *SWITCH_THREAD_FUNC dialog_thread_run(switch_thread_t *thread, void 
 	switch_thread_rwlock_wrlock(locals->rwlock);
 	
 	// Remove from hash while holding write lock
-	switch_mutex_lock(globals.dialogs_mutex);
-	switch_core_hash_delete(globals.dialogs, locals->id);
-	switch_mutex_unlock(globals.dialogs_mutex);
+	switch_mutex_lock(globals.dlgs_mutex);
+	switch_core_hash_delete(globals.dlgs, locals->id);
+	switch_mutex_unlock(globals.dlgs_mutex);
 	
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-		"Dialog thread ending for id: %s\n", locals->id);
+		"dlg thread ending for id: %s\n", locals->id);
 
-	// Safe to destroy pool - we have write lock and dialog is removed from hash
+	// Safe to destroy pool - we have write lock and dlg is removed from hash
 	switch_core_destroy_memory_pool(&locals->pool);
 	
 	// Keep rwlock held until thread exits
 	return NULL;
 }
 
-static dialog_locals_t *find_dialog(const char *id)
+static dlg_locals_t *find_dlg(const char *id)
 {
-	dialog_locals_t *locals = NULL;
+	dlg_locals_t *locals = NULL;
 	
-	switch_mutex_lock(globals.dialogs_mutex);
-	if ((locals = switch_core_hash_find(globals.dialogs, id))) {
+	switch_mutex_lock(globals.dlgs_mutex);
+	if ((locals = switch_core_hash_find(globals.dlgs, id))) {
 		if (switch_thread_rwlock_tryrdlock(locals->rwlock) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-				"Found dialog but failed to lock rwlock: %s\n", id);
+				"Found dlg but failed to lock rwlock: %s\n", id);
 			locals = NULL;
 		}
 	}
-	switch_mutex_unlock(globals.dialogs_mutex);
+	switch_mutex_unlock(globals.dlgs_mutex);
 	
 	return locals;
 }
 
-static dialog_locals_t *create_dialog_thread(const char *id)
+static dlg_locals_t *create_dlg_thread(const char *id)
 {
-	dialog_locals_t *locals;
+	dlg_locals_t *locals;
 	switch_threadattr_t *thd_attr = NULL;
 	switch_memory_pool_t *pool;
 
-	// Create memory pool for this dialog
+	// Create memory pool for this dlg
 	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-			"Failed to create memory pool for dialog: %s\n", id);
+			"Failed to create memory pool for dlg: %s\n", id);
 		return NULL;
 	}
 
-	// Allocate dialog structure
-	locals = switch_core_alloc(pool, sizeof(dialog_locals_t));
+	// Allocate dlg structure
+	locals = switch_core_alloc(pool, sizeof(dlg_locals_t));
 	locals->pool = pool;
 	locals->id = switch_core_strdup(pool, id);
 	locals->running = SWITCH_TRUE;
@@ -126,17 +126,17 @@ static dialog_locals_t *create_dialog_thread(const char *id)
 	switch_thread_rwlock_create(&locals->rwlock, locals->pool);
 	if (switch_queue_create(&locals->message_queue, 100, locals->pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-			"Failed to create message queue for dialog: %s\n", id);
+			"Failed to create message queue for dlg: %s\n", id);
 		switch_core_destroy_memory_pool(&pool);
 		return NULL;
 	}
 
-	// Create and start the dialog thread
+	// Create and start the dlg thread
 	switch_threadattr_create(&thd_attr, locals->pool);
 	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
-	if (switch_thread_create(&locals->thread, thd_attr, dialog_thread_run, locals, locals->pool) != SWITCH_STATUS_SUCCESS) {
+	if (switch_thread_create(&locals->thread, thd_attr, dlg_thread_run, locals, locals->pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-			"Failed to create thread for dialog: %s\n", id);
+			"Failed to create thread for dlg: %s\n", id);
 		switch_core_destroy_memory_pool(&pool);
 		return NULL;
 	}
@@ -144,7 +144,7 @@ static dialog_locals_t *create_dialog_thread(const char *id)
 	return locals;
 }
 
-SWITCH_STANDARD_API(dialog_api_function)
+SWITCH_STANDARD_API(dlg_api_function)
 {
 	char *argv[10] = { 0 };
 	int argc;
@@ -165,30 +165,30 @@ SWITCH_STANDARD_API(dialog_api_function)
 	}
 
 	if (!strcasecmp(argv[0], "create")) {
-		dialog_locals_t *dialog;
+		dlg_locals_t *dlg;
 
-		// Check if dialog already exists
-		if (find_dialog(argv[1])) {
-			stream->write_function(stream, "-ERR Dialog %s already exists\n", argv[1]);
+		// Check if dlg already exists
+		if (find_dlg(argv[1])) {
+			stream->write_function(stream, "-ERR dlg %s already exists\n", argv[1]);
 			goto done;
 		}
 
-		// Create new dialog thread
-		dialog = create_dialog_thread(argv[1]);
-		if (!dialog) {
-			stream->write_function(stream, "-ERR Failed to create dialog %s\n", argv[1]);
+		// Create new dlg thread
+		dlg = create_dlg_thread(argv[1]);
+		if (!dlg) {
+			stream->write_function(stream, "-ERR Failed to create dlg %s\n", argv[1]);
 			goto done;
 		}
 
 		// Add to hash table
-		switch_mutex_lock(globals.dialogs_mutex);
-		switch_core_hash_insert(globals.dialogs, dialog->id, dialog);
-		switch_mutex_unlock(globals.dialogs_mutex);
+		switch_mutex_lock(globals.dlgs_mutex);
+		switch_core_hash_insert(globals.dlgs, dlg->id, dlg);
+		switch_mutex_unlock(globals.dlgs_mutex);
 
-		stream->write_function(stream, "+OK Dialog %s created\n", argv[1]);
+		stream->write_function(stream, "+OK dlg %s created\n", argv[1]);
 	}
 	else if (!strcasecmp(argv[0], "send")) {
-		dialog_locals_t *dialog;
+		dlg_locals_t *dlg;
 		char *message;
 
 		if (argc < 3) {
@@ -196,9 +196,9 @@ SWITCH_STANDARD_API(dialog_api_function)
 			goto done;
 		}
 
-		dialog = find_dialog(argv[1]);
-		if (!dialog) {
-			stream->write_function(stream, "-ERR Dialog %s not found\n", argv[1]);
+		dlg = find_dlg(argv[1]);
+		if (!dlg) {
+			stream->write_function(stream, "-ERR dlg %s not found\n", argv[1]);
 			goto done;
 		}
 
@@ -206,12 +206,12 @@ SWITCH_STANDARD_API(dialog_api_function)
 		message = strdup(argv[2]);
 		if (!message) {
 			stream->write_function(stream, "-ERR Memory allocation failed\n");
-			switch_thread_rwlock_unlock(dialog->rwlock);
+			switch_thread_rwlock_unlock(dlg->rwlock);
 			goto done;
 		}
 		
 		// Queue message
-		if (switch_queue_trypush(dialog->message_queue, message) != SWITCH_STATUS_SUCCESS) {
+		if (switch_queue_trypush(dlg->message_queue, message) != SWITCH_STATUS_SUCCESS) {
 			switch_safe_free(message);  // Free message if queue push failed
 			stream->write_function(stream, "-ERR Failed to queue message\n");
 		} else {
@@ -219,7 +219,7 @@ SWITCH_STANDARD_API(dialog_api_function)
 		}
 
 		// Release read lock
-		switch_thread_rwlock_unlock(dialog->rwlock);
+		switch_thread_rwlock_unlock(dlg->rwlock);
 	}
 	else {
 		stream->write_function(stream, "-ERR Unknown command: %s\n", argv[0]);
@@ -230,35 +230,35 @@ done:
 	return status;
 }
 
-SWITCH_MODULE_LOAD_FUNCTION(mod_poc_dialog_load)
+SWITCH_MODULE_LOAD_FUNCTION(mod_poc_dlg_load)
 {
 	switch_api_interface_t *api_interface;
 	
 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
 	globals.pool = pool;
 
-	// Initialize dialog hash table
-	switch_mutex_init(&globals.dialogs_mutex, SWITCH_MUTEX_NESTED, globals.pool);
-	switch_core_hash_init(&globals.dialogs);
+	// Initialize dlg hash table
+	switch_mutex_init(&globals.dlgs_mutex, SWITCH_MUTEX_NESTED, globals.pool);
+	switch_core_hash_init(&globals.dlgs);
 
-	SWITCH_ADD_API(api_interface, "dialog", "Dialog testing", dialog_api_function, "<cmd> <id> [<args>]");
+	SWITCH_ADD_API(api_interface, "dlg", "dlg testing", dlg_api_function, "<cmd> <id> [<args>]");
 
 	return SWITCH_STATUS_SUCCESS;
 }
 
-SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_poc_dialog_shutdown)
+SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_poc_dlg_shutdown)
 {
 	switch_hash_index_t *hi;
 	void *val;
-	dialog_locals_t *dialog;
+	dlg_locals_t *dlg;
 
-	switch_mutex_lock(globals.dialogs_mutex);
-	for (hi = switch_core_hash_first(globals.dialogs); hi; hi = switch_core_hash_next(&hi)) {
+	switch_mutex_lock(globals.dlgs_mutex);
+	for (hi = switch_core_hash_first(globals.dlgs); hi; hi = switch_core_hash_next(&hi)) {
 		switch_core_hash_this(hi, NULL, NULL, &val);
-		dialog = (dialog_locals_t *)val;
-		dialog->running = SWITCH_FALSE;
+		dlg = (dlg_locals_t *)val;
+		dlg->running = SWITCH_FALSE;
 	}
-	switch_mutex_unlock(globals.dialogs_mutex);
+	switch_mutex_unlock(globals.dlgs_mutex);
 
 	return SWITCH_STATUS_SUCCESS;
 }
