@@ -35,31 +35,26 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_poc_dialog_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_poc_dialog_shutdown);
 SWITCH_MODULE_DEFINITION(mod_poc_dialog, mod_poc_dialog_load, mod_poc_dialog_shutdown, NULL);
 
-struct dialog_locals {
+typedef struct {
 	char *id;
 	switch_thread_t *thread;
 	switch_queue_t *message_queue;
 	switch_memory_pool_t *pool;
-	switch_mutex_t *mutex;
-	switch_thread_rwlock_t *rwlock;    // Fixed: Using switch_thread_rwlock_t
+	switch_thread_rwlock_t *rwlock;
 	switch_bool_t running;
-};
+	switch_bool_t destroy_pending;    // Indicates thread is being destroyed
+	switch_memory_pool_t *pool_pending;  // Temporary pool for cleanup
+} dialog_locals_t;
 
 static struct {
 	switch_memory_pool_t *pool;
-	switch_socket_t *socket;
-	int epoll_fd;
-	int server_fd;
-	switch_bool_t running;
-	switch_thread_t *thread;
-	switch_mutex_t *mutex;
 	switch_hash_t *dialogs;          // Hash table for dialog threads
 	switch_mutex_t *dialogs_mutex;   // Mutex for dialog hash table access
 } globals;
 
 static void *SWITCH_THREAD_FUNC dialog_thread_run(switch_thread_t *thread, void *obj)
 {
-	struct dialog_thread *dialog = (struct dialog_thread *)obj;
+	dialog_locals_t *dialog = (dialog_locals_t *)obj;
 	void *pop;
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, 
@@ -67,34 +62,63 @@ static void *SWITCH_THREAD_FUNC dialog_thread_run(switch_thread_t *thread, void 
 
 	while (dialog->running) {
 		if (switch_queue_pop(dialog->message_queue, &pop) == SWITCH_STATUS_SUCCESS) {
-			char *msg;
-			msg = (char *)pop;
+			char *msg = (char *)pop;
 			
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-				"Dialog %s processing message:\n%s\n", dialog->id, msg);
+				"Dialog %s processing message: %s\n", dialog->id, msg);
 			switch_safe_free(msg);
 		}
 	}
 
-	// Get write lock before cleanup - this ensures no readers are accessing us
+	// Mark for destruction but keep structure alive
+	dialog->destroy_pending = SWITCH_TRUE;
+	
+	// Get write lock to ensure no new readers
 	switch_thread_rwlock_wrlock(dialog->rwlock);
-
-	// Remove ourselves from the hash table
+	
+	// Remove from hash while holding write lock
 	switch_mutex_lock(globals.dialogs_mutex);
 	switch_core_hash_delete(globals.dialogs, dialog->id);
 	switch_mutex_unlock(globals.dialogs_mutex);
 
+	// Create new pool for cleanup state
+	switch_core_new_memory_pool(&dialog->pool_pending);
+	
+	// Move essential data to new pool
+	dialog->id = switch_core_strdup(dialog->pool_pending, dialog->id);
+	
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 		"Dialog thread ending for id: %s\n", dialog->id);
 
-	// Clean up our memory pool which will free all allocated memory
+	// Now safe to destroy main pool - no one can be accessing it
 	switch_core_destroy_memory_pool(&dialog->pool);
+	dialog->pool = dialog->pool_pending;
+	
+	// Keep rwlock held until thread exits
 	return NULL;
 }
 
-static struct dialog_thread *create_dialog_thread(const char *id)
+static dialog_locals_t *find_dialog(const char *id)
 {
-	struct dialog_thread *dialog;
+	dialog_locals_t *dialog = NULL;
+	
+	switch_mutex_lock(globals.dialogs_mutex);
+	if ((dialog = switch_core_hash_find(globals.dialogs, id))) {
+		if (dialog->destroy_pending) {
+			// Dialog is being destroyed, treat as not found
+			dialog = NULL;
+		} else if (switch_thread_rwlock_tryrdlock(dialog->rwlock) != SWITCH_STATUS_SUCCESS) {
+			dialog = NULL;
+		}
+	}
+	switch_mutex_unlock(globals.dialogs_mutex);
+	
+	return dialog;
+}
+
+static dialog_locals_t *create_dialog_thread(const char *id)
+{
+	dialog_locals_t *dialog;
 	switch_threadattr_t *thd_attr = NULL;
 	switch_memory_pool_t *pool;
 
@@ -106,13 +130,14 @@ static struct dialog_thread *create_dialog_thread(const char *id)
 	}
 
 	// Allocate dialog structure
-	dialog = switch_core_alloc(pool, sizeof(struct dialog_thread));
+	dialog = switch_core_alloc(pool, sizeof(dialog_locals_t));
 	dialog->pool = pool;
 	dialog->id = switch_core_strdup(pool, id);
 	dialog->running = SWITCH_TRUE;
+	dialog->destroy_pending = SWITCH_FALSE;
+	dialog->pool_pending = NULL;
 
-	// Initialize mutex, rwlock and message queue
-	switch_mutex_init(&dialog->mutex, SWITCH_MUTEX_NESTED, dialog->pool);
+	// Initialize rwlock and message queue
 	switch_thread_rwlock_create(&dialog->rwlock, dialog->pool);
 	if (switch_queue_create(&dialog->message_queue, 100, dialog->pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
@@ -134,25 +159,89 @@ static struct dialog_thread *create_dialog_thread(const char *id)
 	return dialog;
 }
 
-static struct dialog_thread *find_dialog(const char *id)
+SWITCH_STANDARD_API(dialog_api_function)
 {
-	struct dialog_locals *locals = NULL;
+	char *argv[10] = { 0 };
+	int argc;
+	char *mycmd = NULL;
+	switch_status_t status = SWITCH_STATUS_SUCCESS;
 
-	switch_mutex_lock(globals.dialogs_mutex);
-	if ((dialog = switch_core_hash_find(globals.dialogs, id))) {
-		if (switch_thread_rwlock_tryrdlock(dialog->rwlock) != SWITCH_STATUS_SUCCESS) {
-			dialog = NULL;
-		}
+	if (zstr(cmd)) {
+		stream->write_function(stream, "-ERR Invalid input\n");
+		return SWITCH_STATUS_SUCCESS;
 	}
-	switch_mutex_unlock(globals.dialogs_mutex);
 
-	return dialog;
+	mycmd = strdup(cmd);
+	argc = switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
+
+	if (argc < 2) {
+		stream->write_function(stream, "-ERR Invalid input\n");
+		goto done;
+	}
+
+	if (!strcasecmp(argv[0], "create")) {
+		dialog_locals_t *dialog;
+
+		// Check if dialog already exists
+		if (find_dialog(argv[1])) {
+			stream->write_function(stream, "-ERR Dialog %s already exists\n", argv[1]);
+			goto done;
+		}
+
+		// Create new dialog thread
+		dialog = create_dialog_thread(argv[1]);
+		if (!dialog) {
+			stream->write_function(stream, "-ERR Failed to create dialog %s\n", argv[1]);
+			goto done;
+		}
+
+		// Add to hash table
+		switch_mutex_lock(globals.dialogs_mutex);
+		switch_core_hash_insert(globals.dialogs, dialog->id, dialog);
+		switch_mutex_unlock(globals.dialogs_mutex);
+
+		stream->write_function(stream, "+OK Dialog %s created\n", argv[1]);
+	}
+	else if (!strcasecmp(argv[0], "send")) {
+		dialog_locals_t *dialog;
+		char *message;
+
+		if (argc < 3) {
+			stream->write_function(stream, "-ERR Missing message\n");
+			goto done;
+		}
+
+		dialog = find_dialog(argv[1]);
+		if (!dialog) {
+			stream->write_function(stream, "-ERR Dialog %s not found\n", argv[1]);
+			goto done;
+		}
+
+		// Allocate message from dialog's pool
+		message = switch_core_strdup(dialog->pool, argv[2]);
+		
+		// Queue message
+		if (switch_queue_trypush(dialog->message_queue, message) != SWITCH_STATUS_SUCCESS) {
+			stream->write_function(stream, "-ERR Failed to queue message\n");
+		} else {
+			stream->write_function(stream, "+OK Message queued\n");
+		}
+
+		// Release read lock
+		switch_thread_rwlock_unlock(dialog->rwlock);
+	}
+	else {
+		stream->write_function(stream, "-ERR Unknown command: %s\n", argv[0]);
+	}
+
+done:
+	switch_safe_free(mycmd);
+	return status;
 }
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_poc_dialog_load)
 {
 	switch_api_interface_t *api_interface;
-	switch_threadattr_t *thd_attr = NULL;
 	
 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
 	globals.pool = pool;
@@ -161,13 +250,25 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_poc_dialog_load)
 	switch_mutex_init(&globals.dialogs_mutex, SWITCH_MUTEX_NESTED, globals.pool);
 	switch_core_hash_init(&globals.dialogs);
 
-	globals.running = SWITCH_TRUE;
+	SWITCH_ADD_API(api_interface, "dialog", "Dialog testing", dialog_api_function, "<cmd> <id> [<args>]");
 
 	return SWITCH_STATUS_SUCCESS;
 }
 
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_poc_dialog_shutdown)
 {
+	switch_hash_index_t *hi;
+	void *val;
+	dialog_locals_t *dialog;
+
+	switch_mutex_lock(globals.dialogs_mutex);
+	for (hi = switch_core_hash_first(globals.dialogs); hi; hi = switch_core_hash_next(&hi)) {
+		switch_core_hash_this(hi, NULL, NULL, &val);
+		dialog = (dialog_locals_t *)val;
+		dialog->running = SWITCH_FALSE;
+	}
+	switch_mutex_unlock(globals.dialogs_mutex);
+
 	return SWITCH_STATUS_SUCCESS;
 }
 
