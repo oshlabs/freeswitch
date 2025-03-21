@@ -103,7 +103,7 @@ static dlg_locals_t *find_dlg(const char *id)
 	return locals;
 }
 
-static dlg_locals_t *create_dlg_thread(const char *id)
+static dlg_locals_t *new_dlg_thread(const char *id)
 {
 	dlg_locals_t *locals;
 	switch_threadattr_t *thd_attr = NULL;
@@ -164,7 +164,7 @@ SWITCH_STANDARD_API(dlg_api_function)
 		goto done;
 	}
 
-	if (!strcasecmp(argv[0], "create")) {
+	if (!strcasecmp(argv[0], "new")) {
 		dlg_locals_t *dlg;
 
 		// Check if dlg already exists
@@ -174,9 +174,9 @@ SWITCH_STANDARD_API(dlg_api_function)
 		}
 
 		// Create new dlg thread
-		dlg = create_dlg_thread(argv[1]);
+		dlg = new_dlg_thread(argv[1]);
 		if (!dlg) {
-			stream->write_function(stream, "-ERR Failed to create dlg %s\n", argv[1]);
+			stream->write_function(stream, "-ERR Failed to create new dlg %s\n", argv[1]);
 			goto done;
 		}
 
@@ -185,7 +185,7 @@ SWITCH_STANDARD_API(dlg_api_function)
 		switch_core_hash_insert(globals.dlgs, dlg->id, dlg);
 		switch_mutex_unlock(globals.dlgs_mutex);
 
-		stream->write_function(stream, "+OK dlg %s created\n", argv[1]);
+		stream->write_function(stream, "+OK new dlg %s created\n", argv[1]);
 	}
 	else if (!strcasecmp(argv[0], "send")) {
 		dlg_locals_t *dlg;
