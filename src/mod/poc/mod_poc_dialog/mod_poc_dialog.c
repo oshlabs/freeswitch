@@ -42,8 +42,6 @@ typedef struct {
 	switch_memory_pool_t *pool;
 	switch_thread_rwlock_t *rwlock;
 	switch_bool_t running;
-	switch_bool_t destroy_pending;    // Indicates thread is being destroyed
-	switch_memory_pool_t *pool_pending;  // Temporary pool for cleanup
 } dialog_locals_t;
 
 static struct {
@@ -54,45 +52,35 @@ static struct {
 
 static void *SWITCH_THREAD_FUNC dialog_thread_run(switch_thread_t *thread, void *obj)
 {
-	dialog_locals_t *dialog = (dialog_locals_t *)obj;
+	dialog_locals_t *locals = (dialog_locals_t *)obj;
 	void *pop;
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, 
-		"Dialog thread starting for id: %s\n", dialog->id);
+		"Dialog thread starting for id: %s\n", locals->id);
 
-	while (dialog->running) {
-		if (switch_queue_pop(dialog->message_queue, &pop) == SWITCH_STATUS_SUCCESS) {
+	while (locals->running) {
+		if (switch_queue_pop(locals->message_queue, &pop) == SWITCH_STATUS_SUCCESS) {
 			char *msg = (char *)pop;
 			
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-				"Dialog %s processing message: %s\n", dialog->id, msg);
+				"Dialog %s processing message: %s\n", locals->id, msg);
 			switch_safe_free(msg);
 		}
 	}
-
-	// Mark for destruction but keep structure alive
-	dialog->destroy_pending = SWITCH_TRUE;
 	
 	// Get write lock to ensure no new readers
-	switch_thread_rwlock_wrlock(dialog->rwlock);
+	switch_thread_rwlock_wrlock(locals->rwlock);
 	
 	// Remove from hash while holding write lock
 	switch_mutex_lock(globals.dialogs_mutex);
-	switch_core_hash_delete(globals.dialogs, dialog->id);
+	switch_core_hash_delete(globals.dialogs, locals->id);
 	switch_mutex_unlock(globals.dialogs_mutex);
-
-	// Create new pool for cleanup state
-	switch_core_new_memory_pool(&dialog->pool_pending);
-	
-	// Move essential data to new pool
-	dialog->id = switch_core_strdup(dialog->pool_pending, dialog->id);
 	
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-		"Dialog thread ending for id: %s\n", dialog->id);
+		"Dialog thread ending for id: %s\n", locals->id);
 
-	// Now safe to destroy main pool - no one can be accessing it
-	switch_core_destroy_memory_pool(&dialog->pool);
-	dialog->pool = dialog->pool_pending;
+	// Safe to destroy pool - we have write lock and dialog is removed from hash
+	switch_core_destroy_memory_pool(&locals->pool);
 	
 	// Keep rwlock held until thread exits
 	return NULL;
@@ -100,25 +88,24 @@ static void *SWITCH_THREAD_FUNC dialog_thread_run(switch_thread_t *thread, void 
 
 static dialog_locals_t *find_dialog(const char *id)
 {
-	dialog_locals_t *dialog = NULL;
+	dialog_locals_t *locals = NULL;
 	
 	switch_mutex_lock(globals.dialogs_mutex);
-	if ((dialog = switch_core_hash_find(globals.dialogs, id))) {
-		if (dialog->destroy_pending) {
-			// Dialog is being destroyed, treat as not found
-			dialog = NULL;
-		} else if (switch_thread_rwlock_tryrdlock(dialog->rwlock) != SWITCH_STATUS_SUCCESS) {
-			dialog = NULL;
+	if ((locals = switch_core_hash_find(globals.dialogs, id))) {
+		if (switch_thread_rwlock_tryrdlock(locals->rwlock) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+				"Found dialog but failed to lock rwlock: %s\n", id);
+			locals = NULL;
 		}
 	}
 	switch_mutex_unlock(globals.dialogs_mutex);
 	
-	return dialog;
+	return locals;
 }
 
 static dialog_locals_t *create_dialog_thread(const char *id)
 {
-	dialog_locals_t *dialog;
+	dialog_locals_t *locals;
 	switch_threadattr_t *thd_attr = NULL;
 	switch_memory_pool_t *pool;
 
@@ -130,16 +117,14 @@ static dialog_locals_t *create_dialog_thread(const char *id)
 	}
 
 	// Allocate dialog structure
-	dialog = switch_core_alloc(pool, sizeof(dialog_locals_t));
-	dialog->pool = pool;
-	dialog->id = switch_core_strdup(pool, id);
-	dialog->running = SWITCH_TRUE;
-	dialog->destroy_pending = SWITCH_FALSE;
-	dialog->pool_pending = NULL;
+	locals = switch_core_alloc(pool, sizeof(dialog_locals_t));
+	locals->pool = pool;
+	locals->id = switch_core_strdup(pool, id);
+	locals->running = SWITCH_TRUE;
 
 	// Initialize rwlock and message queue
-	switch_thread_rwlock_create(&dialog->rwlock, dialog->pool);
-	if (switch_queue_create(&dialog->message_queue, 100, dialog->pool) != SWITCH_STATUS_SUCCESS) {
+	switch_thread_rwlock_create(&locals->rwlock, locals->pool);
+	if (switch_queue_create(&locals->message_queue, 100, locals->pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
 			"Failed to create message queue for dialog: %s\n", id);
 		switch_core_destroy_memory_pool(&pool);
@@ -147,16 +132,16 @@ static dialog_locals_t *create_dialog_thread(const char *id)
 	}
 
 	// Create and start the dialog thread
-	switch_threadattr_create(&thd_attr, dialog->pool);
+	switch_threadattr_create(&thd_attr, locals->pool);
 	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
-	if (switch_thread_create(&dialog->thread, thd_attr, dialog_thread_run, dialog, dialog->pool) != SWITCH_STATUS_SUCCESS) {
+	if (switch_thread_create(&locals->thread, thd_attr, dialog_thread_run, locals, locals->pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
 			"Failed to create thread for dialog: %s\n", id);
 		switch_core_destroy_memory_pool(&pool);
 		return NULL;
 	}
 
-	return dialog;
+	return locals;
 }
 
 SWITCH_STANDARD_API(dialog_api_function)
@@ -217,11 +202,17 @@ SWITCH_STANDARD_API(dialog_api_function)
 			goto done;
 		}
 
-		// Allocate message from dialog's pool
-		message = switch_core_strdup(dialog->pool, argv[2]);
+		// Allocate message from heap instead of pool
+		message = strdup(argv[2]);
+		if (!message) {
+			stream->write_function(stream, "-ERR Memory allocation failed\n");
+			switch_thread_rwlock_unlock(dialog->rwlock);
+			goto done;
+		}
 		
 		// Queue message
 		if (switch_queue_trypush(dialog->message_queue, message) != SWITCH_STATUS_SUCCESS) {
+			switch_safe_free(message);  // Free message if queue push failed
 			stream->write_function(stream, "-ERR Failed to queue message\n");
 		} else {
 			stream->write_function(stream, "+OK Message queued\n");
