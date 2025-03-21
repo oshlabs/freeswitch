@@ -49,6 +49,7 @@ struct dialog_thread {
 	switch_queue_t *message_queue;
 	switch_memory_pool_t *pool;
 	switch_mutex_t *mutex;
+	switch_thread_rwlock_t *rwlock;    // Fixed: Using switch_thread_rwlock_t
 	switch_bool_t running;
 };
 
@@ -189,7 +190,6 @@ static void *SWITCH_THREAD_FUNC dialog_thread_run(switch_thread_t *thread, void 
 			char *pretty;
 			json = (cJSON *)pop;
 			
-			// Process the JSON message
 			pretty = cJSON_Print(json);
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 				"Dialog %s processing message:\n%s\n", dialog->dialog_id, pretty);
@@ -198,6 +198,9 @@ static void *SWITCH_THREAD_FUNC dialog_thread_run(switch_thread_t *thread, void 
 			cJSON_Delete(json);
 		}
 	}
+
+	// Get write lock before cleanup - this ensures no readers are accessing us
+	switch_thread_rwlock_wrlock(dialog->rwlock);
 
 	// Remove ourselves from the hash table
 	switch_mutex_lock(globals.dialogs_mutex);
@@ -231,8 +234,9 @@ static struct dialog_thread *create_dialog_thread(const char *dialog_id)
 	dialog->dialog_id = switch_core_strdup(pool, dialog_id);
 	dialog->running = SWITCH_TRUE;
 
-	// Initialize mutex and message queue
+	// Initialize mutex, rwlock and message queue
 	switch_mutex_init(&dialog->mutex, SWITCH_MUTEX_NESTED, dialog->pool);
+	switch_thread_rwlock_create(&dialog->rwlock, dialog->pool);
 	if (switch_queue_create(&dialog->message_queue, 100, dialog->pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
 			"Failed to create message queue for dialog: %s\n", dialog_id);
@@ -261,6 +265,7 @@ static void handle_sctp_message(const char *buffer, size_t len,
 	struct dialog_thread *dialog = NULL;
 	const char *dialog_id;
 	char *error_response = NULL;
+	switch_status_t status;
 
 	json = cJSON_Parse(buffer);
 	if (!json) {
@@ -311,8 +316,22 @@ static void handle_sctp_message(const char *buffer, size_t len,
 		goto send_response;
 	}
 
+	// Get read lock on dialog before using it
+	if (switch_thread_rwlock_tryrdlock(dialog->rwlock) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"Failed to get read lock for dialog-id: %s\n", dialog_id);
+		error_response = "error: dialog is shutting down";
+		cJSON_Delete(json);
+		goto send_response;
+	}
+
 	// Queue the JSON to the dialog thread
-	if (switch_queue_trypush(dialog->message_queue, json) != SWITCH_STATUS_SUCCESS) {
+	status = switch_queue_trypush(dialog->message_queue, json);
+	
+	// Release read lock
+	switch_thread_rwlock_unlock(dialog->rwlock);
+
+	if (status != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
 			"Failed to queue message for dialog-id: %s\n", dialog_id);
 		error_response = "error: failed to queue message";
