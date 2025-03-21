@@ -1113,6 +1113,14 @@ Requires:       %{name} = %{version}-%{release}
 %description poc-sctp
 Provides FreeSWITCH mod_poc_sctp, provide an SCTP proof of concept module
 
+%package poc-dialog
+Summary:	FreeSWITCH mod_poc_dialog
+Group:          System/Libraries
+Requires:       %{name} = %{version}-%{release}
+
+%description poc-dialog
+Provides FreeSWITCH mod_poc_dialog, provide an Dialog proof of concept module
+
 
 ######################################################################################################################
 #				FreeSWITCH basic config module
