@@ -66,86 +66,91 @@ static void *SWITCH_THREAD_FUNC sctp_server_thread(switch_thread_t *thread, void
 	char buffer[MAX_BUFFER];
 	int nfds, i;
 	ssize_t len;
+	struct sockaddr_in peer_addr;
+	socklen_t peer_len;
+	struct sctp_sndrcvinfo sinfo;
+	int msg_flags;
+	union sctp_notification *snp;
 
-switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "starting sctp_server_thread\n");
+	memset(events, 0, sizeof(events));
+	memset(&peer_addr, 0, sizeof(peer_addr));
+	memset(&sinfo, 0, sizeof(sinfo));
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "starting sctp_server_thread\n");
 
 	while (globals.running) {
 		nfds = epoll_wait(globals.epoll_fd, events, MAX_EVENTS, 1000);
-		if (nfds < 0) continue;
+		if (nfds < 0) {
+			if (errno != EINTR) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+					"epoll_wait failed: %s\n", strerror(errno));
+			}
+			continue;
+		}
 
 		for (i = 0; i < nfds; i++) {
-switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "xxx %d\n", i);
 			if (events[i].data.fd == globals.server_fd) {
-				struct sockaddr_in peer_addr;
-				socklen_t peer_len = sizeof(peer_addr);
-				struct sctp_sndrcvinfo sinfo;
-				int flags;
-
-#if 0
-
+				peer_len = sizeof(peer_addr);
+				
 				while ((len = sctp_recvmsg(globals.server_fd, buffer, MAX_BUFFER-1,
-										   (struct sockaddr*)&peer_addr, &peer_len,
-										   &sinfo, &flags)) > 0) {
-					buffer[len] = '\0';
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-									  "SCTP received: %s\n", buffer);
+					(struct sockaddr*)&peer_addr, &peer_len,
+					&sinfo, &msg_flags)) > 0) {
 
-					// Respond to exact peer (mandatory!)
-					sctp_sendmsg(globals.server_fd, "ok", 2,
-								 (struct sockaddr*)&peer_addr, peer_len,
-								 sinfo.sinfo_ppid, sinfo.sinfo_flags, sinfo.sinfo_stream, 0, 0);
-				}
-
-				if (len < 0 && (errno != EAGAIN && errno != EWOULDBLOCK)) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-									  "recvmsg error: %s\n", strerror(errno));
-				}
-
-#else
-
-				// In your recvmsg loop:
-				len = sctp_recvmsg(globals.server_fd, buffer, sizeof(buffer),
-								   (struct sockaddr*)&peer_addr, &peer_len,
-								   &sinfo, &flags);
-
-				if (len > 0) {
-					if (flags & MSG_NOTIFICATION) {
-						union sctp_notification *notif = (union sctp_notification*)buffer;
-						if (notif->sn_header.sn_type == SCTP_ASSOC_CHANGE) {
-							struct sctp_assoc_change *sac = &notif->sn_assoc_change;
-							switch(sac->sac_state) {
-								case SCTP_COMM_UP:
-									switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, 
-										"SCTP association established\n");
-									break;
-								case SCTP_COMM_LOST:
-								case SCTP_SHUTDOWN_COMP:
-								case SCTP_CANT_STR_ASSOC:
-									switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, 
-										"SCTP association lost or failed\n");
-									break;
-							}
+					if (msg_flags & MSG_NOTIFICATION) {
+						snp = (union sctp_notification *)buffer;
+						switch(snp->sn_header.sn_type) {
+							case SCTP_ASSOC_CHANGE:
+								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+									"SCTP_ASSOC_CHANGE event, state=%d\n",
+									snp->sn_assoc_change.sac_state);
+								break;
+							case SCTP_PEER_ADDR_CHANGE:
+								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+									"SCTP_PEER_ADDR_CHANGE event\n");
+								break;
+							case SCTP_REMOTE_ERROR:
+								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+									"SCTP_REMOTE_ERROR event\n");
+								break;
+							case SCTP_SEND_FAILED:
+								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+									"SCTP_SEND_FAILED event\n");
+								break;
+							case SCTP_SHUTDOWN_EVENT:
+								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+									"SCTP_SHUTDOWN_EVENT event\n");
+								break;
+							default:
+								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+									"Unknown SCTP notification: %d\n",
+									snp->sn_header.sn_type);
 						}
-						continue; // important: do not process as regular data
+						continue;
 					}
 
 					buffer[len] = '\0';
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, 
-									  "SCTP received: %s\n", buffer);
+						"SCTP received from %s:%d: %s\n",
+						inet_ntoa(peer_addr.sin_addr),
+						ntohs(peer_addr.sin_port),
+						buffer);
+
+					// Send "ok" response
 					sctp_sendmsg(globals.server_fd, "ok", 2,
-								 (struct sockaddr*)&peer_addr, peer_len,
-								 sinfo.sinfo_ppid, sinfo.sinfo_flags,
-								 sinfo.sinfo_stream, 0, 0);
+						(struct sockaddr*)&peer_addr, peer_len,
+						sinfo.sinfo_ppid, sinfo.sinfo_flags,
+						sinfo.sinfo_stream, 0, 0);
 				}
 
-#endif
-
+				if (len < 0 && (errno != EAGAIN && errno != EWOULDBLOCK)) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+						"recvmsg error: %s\n", strerror(errno));
+				}
 			}
 		}
 	}
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "exiting sctp_server_thread\n");
-
 	return NULL;
 }
 
@@ -153,39 +158,51 @@ static switch_status_t init_sctp_server(void)
 {
 	int flags;
 	struct sockaddr_in addr;
-	struct epoll_event ev;
 	struct sctp_initmsg initmsg;
 	struct sctp_event_subscribe events;
+	struct epoll_event ev;
 
-	globals.server_fd = socket(AF_INET, SOCK_SEQPACKET, IPPROTO_SCTP);
-	if (globals.server_fd < 0) return SWITCH_STATUS_FALSE;
-
-	// Set SCTP INIT options explicitly (CRITICAL!)
-	memset(&initmsg, 0, sizeof(initmsg));
-	initmsg.sinit_num_ostreams  = 5;
-	initmsg.sinit_max_instreams = 5;
-	initmsg.sinit_max_attempts  = 4;
-	if (setsockopt(globals.server_fd, IPPROTO_SCTP, SCTP_INITMSG, &initmsg, sizeof(initmsg)) < 0) {
-
-		close(globals.server_fd);
+	globals.epoll_fd = epoll_create1(0);
+	if (globals.epoll_fd < 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create epoll: %s\n", strerror(errno));
 		return SWITCH_STATUS_FALSE;
 	}
 
-	// Enable SCTP event notifications explicitly (CRITICAL!)
+	globals.server_fd = socket(AF_INET, SOCK_SEQPACKET, IPPROTO_SCTP);
+	if (globals.server_fd < 0) {
+		close(globals.epoll_fd);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "SCTP server socket %d initialized\n", globals.server_fd);
+
+	// Set SCTP INIT options
+	memset(&initmsg, 0, sizeof(initmsg));
+	initmsg.sinit_num_ostreams = 5;
+	initmsg.sinit_max_instreams = 5;
+	initmsg.sinit_max_attempts = 4;
+	if (setsockopt(globals.server_fd, IPPROTO_SCTP, SCTP_INITMSG, &initmsg, sizeof(initmsg)) < 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to set SCTP init options: %s\n", strerror(errno));
+		close(globals.server_fd);
+		close(globals.epoll_fd);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	// Enable SCTP event notifications
 	memset(&events, 0, sizeof(events));
 	events.sctp_data_io_event = 1;
-	events.sctp_association_event = 1;  // REQUIRED!
+	events.sctp_association_event = 1;
 	events.sctp_address_event = 1;
 	events.sctp_send_failure_event = 1;
 	events.sctp_peer_error_event = 1;
 	events.sctp_shutdown_event = 1;
 	events.sctp_partial_delivery_event = 1;
 	events.sctp_adaptation_layer_event = 1;
-	events.sctp_authentication_event = 1;
-	events.sctp_sender_dry_event = 1;
 
 	if (setsockopt(globals.server_fd, IPPROTO_SCTP, SCTP_EVENTS, &events, sizeof(events)) < 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to set SCTP event options: %s\n", strerror(errno));
 		close(globals.server_fd);
+		close(globals.epoll_fd);
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -195,28 +212,32 @@ static switch_status_t init_sctp_server(void)
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); //INADDR_ANY;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	addr.sin_port = htons(SCTP_PORT);
 
 	if (bind(globals.server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to bind SCTP socket: %s\n", strerror(errno));
 		close(globals.server_fd);
+		close(globals.epoll_fd);
 		return SWITCH_STATUS_FALSE;
 	}
 
-	//if (listen(globals.server_fd, 5) < 0) {
-	//	close(globals.server_fd);
-	//	return SWITCH_STATUS_FALSE;
-	//}
-
-	globals.epoll_fd = epoll_create1(0);
-	if (globals.epoll_fd < 0) {
+	if (listen(globals.server_fd, 5) < 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to listen on SCTP socket: %s\n", strerror(errno));
 		close(globals.server_fd);
+		close(globals.epoll_fd);
 		return SWITCH_STATUS_FALSE;
 	}
 
-	ev.events = EPOLLIN; // add later: | EPOLLET;
+	memset(&ev, 0, sizeof(ev));
+	ev.events = EPOLLIN;
 	ev.data.fd = globals.server_fd;
-	epoll_ctl(globals.epoll_fd, EPOLL_CTL_ADD, globals.server_fd, &ev);
+	if (epoll_ctl(globals.epoll_fd, EPOLL_CTL_ADD, globals.server_fd, &ev) < 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to add SCTP socket to epoll: %s\n", strerror(errno));
+		close(globals.server_fd);
+		close(globals.epoll_fd);
+		return SWITCH_STATUS_FALSE;
+	}
 
 	return SWITCH_STATUS_SUCCESS;
 }

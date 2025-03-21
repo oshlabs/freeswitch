@@ -22,8 +22,9 @@ defmodule SCTPClient do
       :ok = :gen_sctp.send(socket, assoc, 0, msg)
 
       case :gen_sctp.recv(socket) do
-        {:ok, {_from_ip, _from_port, data}} ->
-          IO.puts("Received: #{inspect(data)}")
+        {:ok, message = {_from_ip, _from_port, _opts, _data}} ->
+          # ex {:ok, {{127, 0, 0, 1}, 5555, [{:sctp_sndrcvinfo, 0, 0, [], 0, 0, 0, 468363411, 0, 7}], "ok"}}
+          IO.puts("Received: #{inspect(message)}")
           loop(socket, assoc)
 
         {:error, reason} ->
