@@ -14,6 +14,7 @@ Makefile.in
 freeswitch.xml.fsxml.tmp
 switch_console
 switch_core
+switch_core_asr
 switch_core_codec
 switch_core_db
 switch_core_file
@@ -30,6 +31,8 @@ switch_log
 switch_packetizer
 switch_red
 switch_rtp
+switch_rtp_pcap
+switch_sip
 switch_ulp
 switch_ulp_jb
 switch_ulp_recover1
@@ -43,6 +46,7 @@ switch_xml
 switch_estimators
 switch_jitter_buffer
 test_sofia
+test_tts_format
 .deps/
 Makefile
 conf/*/
