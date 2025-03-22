@@ -37,17 +37,17 @@ SWITCH_MODULE_DEFINITION(mod_poc_dlg, mod_poc_dlg_load, mod_poc_dlg_shutdown, NU
 
 typedef struct {
 	char *id;
+	switch_memory_pool_t *pool;
 	switch_thread_t *thread;
 	switch_queue_t *message_queue;
-	switch_memory_pool_t *pool;
 	switch_thread_rwlock_t *rwlock;
 	switch_bool_t running;
 } dlg_locals_t;
 
 static struct {
 	switch_memory_pool_t *pool;
-	switch_hash_t *dialogs;          // Hash table for dlg threads
-	switch_mutex_t *dialogs_mutex;   // Mutex for dlg hash table access
+	switch_hash_t *dlgs;
+	switch_mutex_t *mutex;
 } globals;
 
 static void *SWITCH_THREAD_FUNC dlg_thread_run(switch_thread_t *thread, void *obj)
@@ -67,22 +67,10 @@ static void *SWITCH_THREAD_FUNC dlg_thread_run(switch_thread_t *thread, void *ob
 			switch_safe_free(msg);
 		}
 	}
-	
-	// Get write lock to ensure no new readers
-	switch_thread_rwlock_wrlock(locals->rwlock);
-	
-	// Remove from hash while holding write lock
-	switch_mutex_lock(globals.dialogs_mutex);
-	switch_core_hash_delete(globals.dialogs, locals->id);
-	switch_mutex_unlock(globals.dialogs_mutex);
-	
+
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 		"dlg thread ending for id: %s\n", locals->id);
-
-	// Safe to destroy pool - we have write lock and dlg is removed from hash
-	switch_core_destroy_memory_pool(&locals->pool);
 	
-	// Keep rwlock held until thread exits
 	return NULL;
 }
 
@@ -90,17 +78,52 @@ static dlg_locals_t *find_dlg(const char *id)
 {
 	dlg_locals_t *locals = NULL;
 	
-	switch_mutex_lock(globals.dialogs_mutex);
-	if ((locals = switch_core_hash_find(globals.dialogs, id))) {
+	switch_mutex_lock(globals.mutex);
+	if ((locals = switch_core_hash_find(globals.dlgs, id))) {
 		if (switch_thread_rwlock_tryrdlock(locals->rwlock) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 				"Found dlg but failed to lock rwlock: %s\n", id);
 			locals = NULL;
 		}
 	}
-	switch_mutex_unlock(globals.dialogs_mutex);
+	switch_mutex_unlock(globals.mutex);
 	
 	return locals;
+}
+
+static void destroy_dlg(dlg_locals_t **dlg)
+{
+	dlg_locals_t *locals = *dlg;
+	switch_status_t status;
+
+	if (!locals) {
+		return;
+	}
+
+	locals->running = SWITCH_FALSE;
+	
+	// Abort queue to wake up thread
+	// alternatively could use switch_queue_trypop() or switch_queue_pop_timeout() from inside the thread
+	switch_queue_interrupt_all(locals->message_queue);
+
+	if (locals->thread) {
+		switch_thread_join(&status, locals->thread);
+	}
+
+	switch_mutex_lock(globals.mutex);
+	switch_core_hash_delete(globals.dlgs, locals->id);
+	switch_mutex_unlock(globals.mutex);
+
+	if (locals->rwlock) {
+		switch_thread_rwlock_wrlock(locals->rwlock);
+		switch_thread_rwlock_unlock(locals->rwlock);
+	}
+
+	if (locals->pool) {
+		switch_core_destroy_memory_pool(&locals->pool);
+	}
+
+	*dlg = NULL;
 }
 
 static dlg_locals_t *new_dlg_thread(const char *id)
@@ -109,21 +132,23 @@ static dlg_locals_t *new_dlg_thread(const char *id)
 	switch_threadattr_t *thd_attr = NULL;
 	switch_memory_pool_t *pool;
 
-	// Create memory pool for this dlg
+	// Create memory pool first
 	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
 			"Failed to create memory pool for dlg: %s\n", id);
 		return NULL;
 	}
 
-	// Allocate dlg structure
+	// Allocate dlg structure from pool
 	locals = switch_core_alloc(pool, sizeof(dlg_locals_t));
 	locals->pool = pool;
 	locals->id = switch_core_strdup(pool, id);
 	locals->running = SWITCH_TRUE;
 
-	// Initialize rwlock and message queue
+	// Initialize rwlock
 	switch_thread_rwlock_create(&locals->rwlock, locals->pool);
+
+	// Create message queue
 	if (switch_queue_create(&locals->message_queue, 100, locals->pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
 			"Failed to create message queue for dlg: %s\n", id);
@@ -131,7 +156,7 @@ static dlg_locals_t *new_dlg_thread(const char *id)
 		return NULL;
 	}
 
-	// Create and start the dlg thread
+	// Create and start thread last
 	switch_threadattr_create(&thd_attr, locals->pool);
 	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
 	if (switch_thread_create(&locals->thread, thd_attr, dlg_thread_run, locals, locals->pool) != SWITCH_STATUS_SUCCESS) {
@@ -181,9 +206,9 @@ SWITCH_STANDARD_API(dlg_api_function)
 		}
 
 		// Add to hash table
-		switch_mutex_lock(globals.dialogs_mutex);
-		switch_core_hash_insert(globals.dialogs, locals->id, locals);
-		switch_mutex_unlock(globals.dialogs_mutex);
+		switch_mutex_lock(globals.mutex);
+		switch_core_hash_insert(globals.dlgs, locals->id, locals);
+		switch_mutex_unlock(globals.mutex);
 
 		stream->write_function(stream, "+OK new dlg %s created\n", argv[1]);
 	}
@@ -202,7 +227,7 @@ SWITCH_STANDARD_API(dlg_api_function)
 			goto done;
 		}
 
-		// Allocate message from heap instead of pool
+		// Allocate message from heap
 		message = strdup(argv[2]);
 		if (!message) {
 			stream->write_function(stream, "-ERR Memory allocation failed\n");
@@ -212,7 +237,7 @@ SWITCH_STANDARD_API(dlg_api_function)
 		
 		// Queue message
 		if (switch_queue_trypush(locals->message_queue, message) != SWITCH_STATUS_SUCCESS) {
-			switch_safe_free(message);  // Free message if queue push failed
+			switch_safe_free(message);
 			stream->write_function(stream, "-ERR Failed to queue message\n");
 		} else {
 			stream->write_function(stream, "+OK Message queued\n");
@@ -220,6 +245,19 @@ SWITCH_STANDARD_API(dlg_api_function)
 
 		// Release read lock
 		switch_thread_rwlock_unlock(locals->rwlock);
+	}
+	else if (!strcasecmp(argv[0], "kill")) {
+		dlg_locals_t *locals;
+
+		locals = find_dlg(argv[1]);
+		if (!locals) {
+			stream->write_function(stream, "-ERR dlg %s not found\n", argv[1]);
+			goto done;
+		}
+
+		switch_thread_rwlock_unlock(locals->rwlock);
+		destroy_dlg(&locals);
+		stream->write_function(stream, "+OK dlg %s killed\n", argv[1]);
 	}
 	else {
 		stream->write_function(stream, "-ERR Unknown command: %s\n", argv[0]);
@@ -238,8 +276,8 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_poc_dlg_load)
 	globals.pool = pool;
 
 	// Initialize dlg hash table
-	switch_mutex_init(&globals.dialogs_mutex, SWITCH_MUTEX_NESTED, globals.pool);
-	switch_core_hash_init(&globals.dialogs);
+	switch_mutex_init(&globals.mutex, SWITCH_MUTEX_NESTED, globals.pool);
+	switch_core_hash_init(&globals.dlgs);
 
 	SWITCH_ADD_API(api_interface, "dlg", "dlg testing", dlg_api_function, "<cmd> <id> [<args>]");
 
@@ -252,13 +290,13 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_poc_dlg_shutdown)
 	void *val;
 	dlg_locals_t *locals;
 
-	switch_mutex_lock(globals.dialogs_mutex);
-	for (hi = switch_core_hash_first(globals.dialogs); hi; hi = switch_core_hash_next(&hi)) {
+	switch_mutex_lock(globals.mutex);
+	for (hi = switch_core_hash_first(globals.dlgs); hi; hi = switch_core_hash_next(&hi)) {
 		switch_core_hash_this(hi, NULL, NULL, &val);
 		locals = (dlg_locals_t *)val;
-		locals->running = SWITCH_FALSE;
+		destroy_dlg(&locals);
 	}
-	switch_mutex_unlock(globals.dialogs_mutex);
+	switch_mutex_unlock(globals.mutex);
 
 	return SWITCH_STATUS_SUCCESS;
 }
